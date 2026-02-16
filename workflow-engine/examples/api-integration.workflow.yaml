@@ -1,0 +1,44 @@
+# Example workflow: API Integration
+name: "user-onboarding"
+version: "1.0.0"
+description: "Create user account and send welcome email"
+
+inputs:
+  email:
+    type: string
+    required: true
+
+  name:
+    type: string
+    required: true
+
+steps:
+  - name: "create-account"
+    type: "tool"
+    tool: "api:post"
+    arguments:
+      url: "https://api.example.com/users"
+      body:
+        email: "{{ inputs.email }}"
+        name: "{{ inputs.name }}"
+    output: "user"
+
+  - name: "generate-welcome-message"
+    type: "llm"
+    provider: "openai"
+    prompt: "Write a friendly welcome email for {{ inputs.name }}"
+    model: "gpt-4"
+    output: "welcomeMessage"
+
+  - name: "send-email"
+    type: "tool"
+    tool: "email:send"
+    arguments:
+      to: "{{ inputs.email }}"
+      subject: "Welcome to OpenStarry!"
+      body: "{{ steps.generate-welcome-message }}"
+    output: "emailStatus"
+
+outputs:
+  userId: "{{ steps.create-account.id }}"
+  emailSent: "{{ steps.send-email.success }}"

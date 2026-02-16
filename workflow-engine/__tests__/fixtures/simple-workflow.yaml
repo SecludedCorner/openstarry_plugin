@@ -1,0 +1,19 @@
+name: "simple-test"
+version: "1.0.0"
+description: "Simple test workflow"
+
+inputs:
+  message:
+    type: string
+    required: true
+    description: "Input message"
+
+steps:
+  - name: echo-message
+    type: tool
+    tool: "test:echo"
+    arguments:
+      text: "{{ inputs.message }}"
+
+outputs:
+  result: "{{ steps.echo-message }}"
