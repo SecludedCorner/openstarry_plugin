@@ -1,0 +1,48 @@
+# Example workflow: Data Analysis Pipeline
+name: "data-analysis"
+version: "1.0.0"
+description: "Load, parse, and analyze CSV data"
+
+inputs:
+  dataPath:
+    type: string
+    required: true
+    description: "Path to CSV file"
+
+  columns:
+    type: array
+    required: false
+    default: []
+    description: "Column names to analyze"
+
+steps:
+  - name: "load-file"
+    type: "tool"
+    tool: "fs:read"
+    arguments:
+      path: "{{ inputs.dataPath }}"
+    output: "rawData"
+
+  - name: "parse-csv"
+    type: "service"
+    service: "skill-parser"
+    method: "parse"
+    arguments:
+      - "{{ steps.load-file }}"
+      - "csv"
+    output: "parsedData"
+
+  - name: "analyze-data"
+    type: "llm"
+    provider: "anthropic"
+    prompt: |
+      Analyze this CSV data and provide insights:
+      Data: {{ steps.parse-csv }}
+      Focus on columns: {{ inputs.columns }}
+    model: "claude-opus-4-6"
+    temperature: 0.3
+    output: "analysis"
+
+outputs:
+  report: "{{ steps.analyze-data }}"
+  rowCount: "{{ steps.parse-csv.length }}"

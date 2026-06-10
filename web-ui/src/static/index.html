@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OpenStarry Agent</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app">
+    <header id="header">
+      <h1 id="title">OpenStarry Agent</h1>
+      <div id="status" class="disconnected">Disconnected</div>
+    </header>
+
+    <main id="messages"></main>
+
+    <footer id="input-area">
+      <input type="text" id="input" placeholder="Type a message..." autocomplete="off" disabled>
+      <button id="send-btn" disabled>Send</button>
+    </footer>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

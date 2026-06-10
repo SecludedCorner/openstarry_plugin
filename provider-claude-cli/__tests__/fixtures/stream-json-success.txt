@@ -1,0 +1,7 @@
+{"type":"system","subtype":"init","session_id":"sess-abc","model":"claude-sonnet-4-6","permissionMode":"strict-mcp-config"}
+{"type":"stream_event","event":{"delta":{"type":"text_delta","text":"Hello"}}}
+{"type":"stream_event","event":{"delta":{"type":"text_delta","text":", "}}}
+{"type":"stream_event","event":{"delta":{"type":"text_delta","text":"world"}}}
+{"type":"stream_event","event":{"delta":{"type":"text_delta","text":"!"}}}
+{"type":"api_retry","attempt":1}
+{"type":"result","subtype":"success","is_error":false,"result":"Hello, world!","session_id":"sess-abc","num_turns":1,"total_cost_usd":0.001}

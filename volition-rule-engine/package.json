@@ -1,0 +1,30 @@
+{
+  "name": "@openstarry-plugin/volition-rule-engine",
+  "version": "0.1.0-alpha",
+  "description": "IVolition v1 three-layer rule engine plugin for risk-aware deliberation",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "rimraf --glob dist \"*.tsbuildinfo\"",
+    "dev": "tsc -b --watch",
+    "test": "vitest"
+  },
+  "dependencies": {
+    "@openstarry/sdk": "workspace:*",
+    "@openstarry/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^25.2.0",
+    "rimraf": "^5.0.0",
+    "typescript": "^5.5.0",
+    "vitest": "^4.0.18"
+  }
+}
