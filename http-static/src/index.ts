@@ -60,6 +60,7 @@ export function createHttpStaticPlugin(): IPlugin {
       name: "http-static",
       version: "0.1.0",
       description: "Static HTTP file server plugin",
+      skandha: 'rupa' as const,
     },
 
     async factory(ctx: IPluginContext): Promise<PluginHooks> {
@@ -139,6 +140,7 @@ export function createHttpStaticPlugin(): IPlugin {
 
       // IUI — passive (does not render agent events, just serves files)
       const ui: IUI = {
+        skandha: 'rupa' as const,
         id: "http-static-ui",
         name: "HTTP Static Server",
         onEvent(_event: AgentEvent): void {

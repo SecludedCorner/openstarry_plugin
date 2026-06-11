@@ -30,6 +30,7 @@ export function createWorkflowEnginePlugin(): IPlugin {
       author: "OpenStarry Team",
       services: ["workflow-engine"],
       serviceDependencies: [], // Optional: skill-parser, fs:read, etc.
+      skandha: 'samskara' as const,
     },
 
     factory: async (ctx: IPluginContext): Promise<PluginHooks> => {

@@ -3,6 +3,7 @@
  */
 
 import type { IPluginContext } from "@openstarry/sdk";
+import { ServiceKey } from "@openstarry/sdk";
 import type { IServiceStep } from "../../types/workflow.js";
 import { WorkflowExecutionError } from "../../errors.js";
 import { interpolate } from "../interpolate.js";
@@ -26,7 +27,7 @@ export async function executeServiceStep(
   const interpolatedArgs = interpolate(step.arguments, context) as unknown[];
 
   // Get service from registry
-  const service = pluginCtx.services?.get<any>(step.service);
+  const service = pluginCtx.services?.get(new ServiceKey<any>(step.service));
   if (!service) {
     // Soft warning per spec: log and return undefined
     console.warn(

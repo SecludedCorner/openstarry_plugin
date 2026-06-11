@@ -45,6 +45,7 @@ async function fetchModels(baseUrl: string): Promise<ModelInfo[]> {
  * LM Studio Provider — OpenAI-compatible local inference server.
  */
 class LmStudioProvider implements IProvider {
+  public readonly skandha = 'samjna' as const;
   public readonly id = "lmstudio";
   public readonly name = "LM Studio (Local)";
   public readonly loginHint = { usage: "[URL]", description: "LM Studio" };
@@ -208,6 +209,7 @@ export function createLmStudioPlugin(): IPlugin {
       name: "@openstarry-plugin/provider-lmstudio",
       version: "0.1.0-alpha",
       description: "LM Studio provider — connect to local LM Studio server (OpenAI-compatible API)",
+      skandha: 'samjna' as const,
     },
 
     async factory(ctx: IPluginContext): Promise<PluginHooks> {

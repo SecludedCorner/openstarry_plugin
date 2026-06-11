@@ -31,8 +31,25 @@ import { SecureStore, createLogger } from "@openstarry/shared";
 
 // ─── Constants ───
 
+// HOTFIX cycle 03-21 (v0.55.1-alpha): the prior scope `generative-language.tuning`
+// only permits fine-tuning calls (training the model), NOT inference
+// (`generateContent` / `streamGenerateContent`). All Gemini OAuth inference
+// calls failed with HTTP 403 ACCESS_TOKEN_SCOPE_INSUFFICIENT (W2-R26 BLOCKER3
+// per Test #147). The `cloud-platform` scope is broad and is the official
+// Google AI quickstart recommendation; it covers `generativelanguage.*`
+// inference endpoints + future Gemini API expansions without scope churn.
+//
+// Migration: existing tokens are scope-insufficient — Master must delete
+// `~/.openstarry/plugins/gemini-oauth/oauth_token.json` and re-run
+// `/provider login gemini-oauth` to mint a token under the new scope.
+//
+// Google Cloud Console OAuth client (828092589605-...) MUST whitelist
+// `https://www.googleapis.com/auth/cloud-platform` in its OAuth consent
+// screen before re-login succeeds. If not whitelisted, re-register a new
+// client and rebake `oauth-client.enc.json`.
 const GEMINI_SCOPES = [
   "https://www.googleapis.com/auth/cloud-platform",
+  "openid",
   "https://www.googleapis.com/auth/userinfo.email",
   "https://www.googleapis.com/auth/userinfo.profile",
 ];
@@ -42,6 +59,9 @@ const GEMINI_REDIRECT_PORT = 8085;
 const GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
 
+const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta";
+
+// Legacy Code Assist endpoint (kept for loadManagedProject / onboardUser provisioning only)
 const GEMINI_CODE_ASSIST_ENDPOINT = "https://cloudcode-pa.googleapis.com";
 
 const CODE_ASSIST_HEADERS: Record<string, string> = {
@@ -106,6 +126,7 @@ interface GeminiRequest {
   contents: GeminiMessage[];
   systemInstruction?: { parts: Array<{ text: string }> };
   tools?: Array<{ functionDeclarations: GeminiFunctionDeclaration[] }>;
+  toolConfig?: { functionCallingConfig: { mode: string } };
   generationConfig?: {
     temperature?: number;
     maxOutputTokens?: number;
@@ -642,22 +663,25 @@ async function* callGeminiStream(
   model: string,
   request: GeminiRequest,
 ): AsyncGenerator<ProviderStreamEvent> {
-  const endpoint = `${GEMINI_CODE_ASSIST_ENDPOINT}/v1internal:streamGenerateContent?alt=sse`;
+  const endpoint = `${GEMINI_API_BASE}/models/${model}:streamGenerateContent?alt=sse`;
 
-  const wrappedBody = {
-    project: projectId,
-    model,
-    request,
-  };
-
+  // HOTFIX v2 cycle 03-21 (v0.55.2-alpha): X-Goog-User-Project header is REQUIRED
+  // for OAuth-authenticated calls to generativelanguage.googleapis.com (and most
+  // GCP APIs). Google rejects without it; in this context the rejection surfaces
+  // as 403 PERMISSION_DENIED / ACCESS_TOKEN_SCOPE_INSUFFICIENT (W2-R26 BLOCKER
+  // persisted after v0.55.1-alpha scope fix). The projectId comes from
+  // GeminiOAuthManager.ensureProjectId() which prefers config.projectId / env
+  // OPENSTARRY_GEMINI_PROJECT_ID / managed-project provisioning.
+  //
+  // See: https://cloud.google.com/apis/docs/system-parameters
   const response = await fetch(endpoint, {
     method: "POST",
     headers: {
-      ...CODE_ASSIST_HEADERS,
       Authorization: `Bearer ${accessToken}`,
       "Content-Type": "application/json",
+      "X-Goog-User-Project": projectId,
     },
-    body: JSON.stringify(wrappedBody),
+    body: JSON.stringify(request),
   });
 
   if (!response.ok) {
@@ -769,7 +793,8 @@ async function* callGeminiStream(
           }
 
           if (data.candidates?.[0]?.finishReason === "STOP" && !hasYieldedFinish) {
-            yield { type: "finish", stopReason: "end_turn" };
+            const stopReason = pendingFunctionCalls.length > 0 ? "tool_use" : "end_turn";
+            yield { type: "finish", stopReason: stopReason as "end_turn" | "tool_use" };
             hasYieldedFinish = true;
           }
         } catch {
@@ -899,6 +924,7 @@ function createGeminiOAuthAdapter(
   oauthManager: GeminiOAuthManager,
 ): IProvider {
   return {
+    skandha: 'samjna' as const,
     id: "gemini-oauth",
     name: "Gemini (Google OAuth)",
     models: MODELS,
@@ -921,13 +947,19 @@ function createGeminiOAuthAdapter(
         return;
       }
 
+      // HOTFIX v2 cycle 03-21 (v0.55.2-alpha): X-Goog-User-Project header
+      // requires a GCP project ID. ensureProjectId() consults (in order):
+      // env OPENSTARRY_GEMINI_PROJECT_ID, config.projectId, managed-project
+      // provisioning. Fail-fast with operator-actionable error when none.
       const projectId = await oauthManager.ensureProjectId();
       if (!projectId) {
         yield {
           type: "error",
           error: new Error(
-            "Cannot auto-provision Google Cloud Project.\n" +
-              "Set OPENSTARRY_GEMINI_PROJECT_ID env var or configure geminiOAuth.projectId.",
+            "No GCP project configured for gemini-oauth. " +
+            "Set OPENSTARRY_GEMINI_PROJECT_ID env var, " +
+            "or add `projectId` to plugin config in agent.json, " +
+            "or re-run /provider login gemini-oauth to provision a managed project.",
           ),
         };
         return;
@@ -955,6 +987,7 @@ function createGeminiOAuthAdapter(
         contents: geminiMessages,
         systemInstruction,
         tools,
+        ...(tools ? { toolConfig: { functionCallingConfig: { mode: "AUTO" } } } : {}),
         generationConfig: {
           temperature: request.temperature,
           maxOutputTokens: request.maxTokens,
@@ -983,6 +1016,7 @@ export function createGeminiOAuthPlugin(): IPlugin {
       name: "provider-gemini-oauth",
       version: "0.1.0-alpha",
       description: "Gemini LLM provider with PKCE + OAuth 2.0",
+      skandha: 'samjna' as const,
     },
 
     async factory(ctx: IPluginContext): Promise<PluginHooks> {

@@ -34,6 +34,7 @@ export function createDevtoolsPlugin(config?: Partial<DevToolsConfig>): IPlugin 
       version: "0.1.0-alpha",
       description: "DevTools plugin for OpenStarry agent introspection and debugging",
       sandbox: { enabled: false }, // DevTools needs direct process access for metrics
+      skandha: 'samskara' as const,
     },
 
     async factory(ctx: IPluginContext): Promise<PluginHooks> {
@@ -50,6 +51,7 @@ export function createDevtoolsPlugin(config?: Partial<DevToolsConfig>): IPlugin 
 
       // IListener: collects events for metrics
       const metricsListener: IListener = {
+        skandha: 'rupa' as const,
         id: "devtools-metrics-listener",
         name: "DevTools Metrics Listener",
 
@@ -91,6 +93,7 @@ export function createDevtoolsPlugin(config?: Partial<DevToolsConfig>): IPlugin 
 
       // IUI: provides event handler for panel updates
       const devtoolsUI: IUI = {
+        skandha: 'rupa' as const,
         id: "devtools-panel",
         name: "DevTools Panel",
 

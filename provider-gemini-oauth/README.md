@@ -19,7 +19,12 @@ Add to your `agent.json`:
 ```json
 {
   "plugins": [
-    { "name": "@openstarry-plugin/provider-gemini-oauth" }
+    {
+      "name": "@openstarry-plugin/provider-gemini-oauth",
+      "config": {
+        "projectId": "openstarry-491612"
+      }
+    }
   ],
   "cognition": {
     "provider": "gemini-oauth",
@@ -29,6 +34,17 @@ Add to your `agent.json`:
   }
 }
 ```
+
+**`projectId` is REQUIRED** (cycle 03-21 hotfix v0.55.2-alpha). Google API rule:
+OAuth-authenticated calls to `generativelanguage.googleapis.com` MUST include
+the `X-Goog-User-Project` header to specify which GCP project quota is billed
+against. The plugin reads `projectId` from (in order):
+
+1. `OPENSTARRY_GEMINI_PROJECT_ID` env var (overrides config)
+2. `agent.json` plugin `config.projectId`
+3. Managed-project provisioning (auto-discovered if `/provider login gemini-oauth` provisioned a project)
+
+If none resolves, inference fails fast with an operator-actionable error.
 
 ## Models
 
@@ -60,6 +76,31 @@ Add to your `agent.json`:
 - **Machine-bound encryption**: Tokens encrypted with key derived from hostname + username
 - **File permissions**: Token files stored with `chmod 600`
 - **Auto-refresh**: Access tokens refreshed automatically using stored refresh token
+
+## OAuth Scopes (cycle 03-21 hotfix v0.55.1-alpha)
+
+The plugin requests the following Google OAuth scopes during PKCE login:
+
+| Scope | Purpose |
+|-------|---------|
+| `https://www.googleapis.com/auth/cloud-platform` | Inference (`generateContent` / `streamGenerateContent`) and future Gemini API surface |
+| `openid` | Identity assertion |
+| `https://www.googleapis.com/auth/userinfo.email` | Account email lookup |
+| `https://www.googleapis.com/auth/userinfo.profile` | Account profile metadata |
+
+**Migration note (v0.55.1-alpha)**: pre-hotfix releases requested
+`generative-language.tuning` which only permits fine-tuning (training) — NOT
+inference. After upgrading, Master MUST delete the cached token and re-login:
+
+```bash
+rm ~/.openstarry/plugins/gemini-oauth/oauth_token.json
+# then re-run:
+/provider login gemini-oauth
+```
+
+The Google Cloud Console OAuth client MUST whitelist `cloud-platform` in its
+OAuth consent screen before re-login succeeds. If not whitelisted, re-register
+a new client and rebake `oauth-client.enc.json`.
 
 ## Environment Variables
 

@@ -58,6 +58,7 @@ export function createWebUIPlugin(): IPlugin {
       name: "web-ui",
       version: "0.1.0",
       description: "Browser-based agent interface",
+      skandha: 'rupa' as const,
     },
 
     async factory(ctx: IPluginContext): Promise<PluginHooks> {
@@ -146,6 +147,7 @@ export function createWebUIPlugin(): IPlugin {
       }
 
       const ui: IUI = {
+        skandha: 'rupa' as const,
         id: "web-ui",
         name: "Web UI",
         onEvent(_event: AgentEvent): void {

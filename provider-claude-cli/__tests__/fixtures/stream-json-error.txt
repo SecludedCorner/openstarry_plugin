@@ -1,0 +1,3 @@
+{"type":"system","subtype":"init","session_id":"sess-xyz"}
+{"type":"stream_event","event":{"delta":{"type":"text_delta","text":"Working"}}}
+{"type":"result","subtype":"error_max_turns","is_error":true,"result":null,"session_id":"sess-xyz","num_turns":10}

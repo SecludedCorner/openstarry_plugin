@@ -246,6 +246,7 @@ export function createMcpClientPlugin(): IPlugin {
       version: "0.4.0",
       description: "MCP protocol client for importing external tools and prompts",
       author: "OpenStarry Team",
+      skandha: 'rupa' as const,
     },
 
     async factory(ctx: IPluginContext): Promise<PluginHooks> {

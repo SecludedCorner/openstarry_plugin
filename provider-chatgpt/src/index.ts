@@ -53,6 +53,7 @@ interface StoredConfig {
  * ChatGPT Provider Implementation
  */
 class ChatGptProvider implements IProvider {
+  public readonly skandha = 'samjna' as const;
   public readonly id = "chatgpt";
   public readonly name = "ChatGPT (OpenAI)";
   public readonly models = MODELS;
@@ -103,6 +104,7 @@ export function createChatGptPlugin(): IPlugin {
       name: "@openstarry-plugin/provider-chatgpt",
       version: "0.1.0-alpha",
       description: "OpenAI ChatGPT provider with streaming support",
+      skandha: 'samjna' as const,
     },
     async factory(ctx: IPluginContext): Promise<PluginHooks> {
       const storagePath = join(homedir(), ".openstarry", "plugins", "chatgpt");

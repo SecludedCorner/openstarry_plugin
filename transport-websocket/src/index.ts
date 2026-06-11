@@ -29,6 +29,9 @@ import {
   getClientIp,
   extractQueryToken,
 } from "./security.js";
+import { WsPushInputAuthenticator, type WsPushInputAuthConfig } from "./pushinput-auth.js";
+
+export type { WsPushInputAuthConfig } from "./pushinput-auth.js";
 
 /** Health check configuration for WebSocket transport. */
 interface HealthCheckConfig {
@@ -46,6 +49,8 @@ interface Config {
   path?: string;
   healthCheck?: HealthCheckConfig;
   auth?: AuthConfig;
+  /** Plan52 Phase C — per-message source attestation (HMAC + nonce + ts). */
+  pushInputAuth?: WsPushInputAuthConfig;
 }
 
 interface ClientConnection {
@@ -60,12 +65,29 @@ interface ClientConnection {
   sessionId?: string;
 }
 
+/**
+ * SEC-R2 (Plan46 W0): type guard for inbound WebSocket frames.
+ * Fail-closed schema check: `type` must be a non-empty string; `sessionId`
+ * (if present) must be a string; payload and other fields are opaque.
+ * Exported for unit testing.
+ */
+export function isValidWsMessage(
+  data: unknown,
+): data is { type: string; sessionId?: string; payload?: unknown } {
+  if (data === null || typeof data !== "object" || Array.isArray(data)) return false;
+  const rec = data as Record<string, unknown>;
+  if (typeof rec.type !== "string" || rec.type.length === 0) return false;
+  if (rec.sessionId !== undefined && typeof rec.sessionId !== "string") return false;
+  return true;
+}
+
 // ─── WebSocket UI (色蘊) ───
 function createWebSocketUI(
   connections: Map<string, ClientConnection>,
   logger: ReturnType<typeof createLogger>
 ): IUI {
   return {
+    skandha: 'rupa' as const,
     id: "websocket-ui",
     name: "WebSocket UI",
 
@@ -137,6 +159,7 @@ export function createWebSocketPlugin(): IPlugin {
       name: "transport-websocket",
       version: "0.1.0-alpha",
       description: "WebSocket transport plugin (Listener + UI)",
+      skandha: 'rupa' as const,
     },
 
     async factory(ctx: IPluginContext): Promise<PluginHooks> {
@@ -154,6 +177,7 @@ export function createWebSocketPlugin(): IPlugin {
       const connections = new Map<string, ClientConnection>();
       let wss: WebSocketServer | null = null;
       let pingInterval: ReturnType<typeof setInterval> | null = null;
+      const pushInputAuth = new WsPushInputAuthenticator(config.pushInputAuth ?? {});
 
       // ─── Ping All Connections ───
       function pingAll(): void {
@@ -191,6 +215,7 @@ export function createWebSocketPlugin(): IPlugin {
       }
 
       const listener: IListener = {
+        skandha: 'rupa' as const,
         id: "websocket-listener",
         name: "WebSocket Listener",
 
@@ -263,10 +288,26 @@ export function createWebSocketPlugin(): IPlugin {
               conn.alive = true;
             });
 
-            ws.on("message", (data: Buffer | string) => {
+            ws.on("message", async (data: Buffer | string) => {
               const stop = logger.time("ws.message");
               try {
-                const msg = JSON.parse(data.toString());
+                const parsed: unknown = JSON.parse(data.toString());
+
+                // SEC-R2 (Plan46 W0): fail-closed schema validation before
+                // any destructuring of untrusted network input.
+                if (!isValidWsMessage(parsed)) {
+                  logger.warn("Rejected malformed WS frame", { clientId });
+                  try {
+                    ws.send(JSON.stringify({ type: "error", error: "Invalid message" }));
+                  } catch (sendErr) {
+                    logger.error("Failed to send error response", {
+                      clientId,
+                      error: String(sendErr),
+                    });
+                  }
+                  return;
+                }
+                const msg = parsed;
 
                 // Optional session resume: if client specifies a sessionId, rebind
                 if (msg.sessionId && msg.sessionId !== conn.sessionId) {
@@ -288,12 +329,36 @@ export function createWebSocketPlugin(): IPlugin {
                 }
 
                 if (msg.type === "user_input") {
+                  const payload = (msg.payload ?? {}) as { text?: unknown; auth?: unknown };
+                  const text = typeof payload.text === "string" ? payload.text : "";
+                  // Plan52 Phase C — verify per-message source attestation.
+                  // When auth is disabled (default), returns frozen-empty
+                  // sourceContext and the field is omitted (legacy behavior).
+                  const authEnvelope = (payload.auth && typeof payload.auth === "object")
+                    ? payload.auth as Record<string, unknown>
+                    : {};
+                  const authResult = await pushInputAuth.verifyMessage({
+                    kid: typeof authEnvelope.kid === "string" ? authEnvelope.kid : undefined,
+                    nonce: typeof authEnvelope.nonce === "string" ? authEnvelope.nonce : undefined,
+                    ts: typeof authEnvelope.ts === "number" ? authEnvelope.ts : undefined,
+                    tokenSig: typeof authEnvelope.tokenSig === "string" ? authEnvelope.tokenSig : undefined,
+                  }, clientId);
+                  if (!authResult.ok) {
+                    try {
+                      ws.send(JSON.stringify({ type: "auth_rejected", error: authResult.error }));
+                    } catch (sendErr) {
+                      logger.error("Failed to send auth_rejected", { clientId, error: String(sendErr) });
+                    }
+                    return;
+                  }
+                  const sourceContextKeys = Object.keys(authResult.sourceContext);
                   ctx.pushInput({
                     source: "websocket",
                     inputType: "user_input",
-                    data: msg.payload?.text ?? "",
+                    data: text,
                     replyTo: clientId,
                     sessionId: conn.sessionId,
+                    ...(sourceContextKeys.length > 0 ? { sourceContext: authResult.sourceContext } : {}),
                   });
                 } else if (msg.type === "ping") {
                   try {

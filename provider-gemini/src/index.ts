@@ -74,6 +74,7 @@ interface GeminiRequest {
   contents: GeminiMessage[];
   systemInstruction?: { parts: Array<{ text: string }> };
   tools?: Array<{ functionDeclarations: GeminiFunctionDeclaration[] }>;
+  toolConfig?: { functionCallingConfig: { mode: string } };
   generationConfig?: {
     temperature?: number;
     maxOutputTokens?: number;
@@ -245,7 +246,8 @@ async function* callGeminiStream(
             data.candidates?.[0]?.finishReason === "STOP" &&
             !hasYieldedFinish
           ) {
-            yield { type: "finish", stopReason: "end_turn" };
+            const stopReason = pendingFunctionCalls.length > 0 ? "tool_use" : "end_turn";
+            yield { type: "finish", stopReason: stopReason as "end_turn" | "tool_use" };
             hasYieldedFinish = true;
           }
         } catch {
@@ -379,6 +381,7 @@ function convertMessages(
 
 function createGeminiAdapter(keyManager: GeminiApiKeyManager): IProvider {
   return {
+    skandha: 'samjna' as const,
     id: "gemini",
     name: "Gemini (API Key)",
     models: MODELS,
@@ -423,6 +426,7 @@ function createGeminiAdapter(keyManager: GeminiApiKeyManager): IProvider {
         contents: geminiMessages,
         systemInstruction,
         tools,
+        ...(tools ? { toolConfig: { functionCallingConfig: { mode: "AUTO" } } } : {}),
         generationConfig: {
           temperature: request.temperature,
           maxOutputTokens: request.maxTokens,
@@ -446,6 +450,7 @@ export function createGeminiPlugin(): IPlugin {
       name: "@openstarry-plugin/provider-gemini",
       version: "0.1.0-alpha",
       description: "Gemini LLM provider with API key authentication",
+      skandha: 'samjna' as const,
     },
 
     async factory(ctx: IPluginContext): Promise<PluginHooks> {

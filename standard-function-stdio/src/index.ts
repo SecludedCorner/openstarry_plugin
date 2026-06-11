@@ -30,12 +30,29 @@ const YELLOW = "\x1b[33m";
 const RED = "\x1b[31m";
 const MAGENTA = "\x1b[35m";
 
+// ─── ANSI Escape Sanitization (DT-42-D — ZT-3 tightening) ───
+//
+// Strip ANSI escape sequences from untrusted tool-result strings before
+// rendering. Tool stdout may contain ANSI from colorized commands (git diff,
+// npm, etc.); downstream consumers (log aggregators, terminal-naive parsers)
+// can misbehave on raw escapes. We strip CSI sequences (`\x1b[...x`), OSC
+// (`\x1b]...BEL`), and 2-char escapes (`\x1b@`..`\x1b_`) — broad coverage of
+// the common subset without trying to be a full terminal emulator.
+
+// eslint-disable-next-line no-control-regex
+const ANSI_PATTERN = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*\x07|[@-~])/g;
+
+export function stripAnsiEscapes(s: string): string {
+  return s.replace(ANSI_PATTERN, "");
+}
+
 // ─── Stdio Listener (受蘊 - Input) ───
 
 function createStdioListener(ctx: IPluginContext): IListener {
   let rl: ReturnType<typeof createInterface> | null = null;
 
   return {
+    skandha: 'rupa' as const,
     id: "stdio-listener",
     name: "Standard I/O Listener",
 
@@ -90,6 +107,7 @@ function createStdioUI(ctx: IPluginContext): IUI {
   }
 
   return {
+    skandha: 'rupa' as const,
     id: "stdio-ui",
     name: "Standard I/O UI",
 
@@ -154,7 +172,9 @@ function createStdioUI(ctx: IPluginContext): IUI {
         }
 
         case AgentEventType.TOOL_RESULT: {
-          const result = (payload?.result as string) ?? "";
+          // DT-42-D: sanitize ANSI escapes from untrusted tool stdout before
+          // truncate + render (ZT-3 tightening; downstream consumer safety).
+          const result = stripAnsiEscapes((payload?.result as string) ?? "");
           const truncated =
             result.length > 500 ? result.slice(0, 500) + "..." : result;
           console.log(`${DIM}[tool result] ${truncated}${RESET}`);
@@ -162,8 +182,9 @@ function createStdioUI(ctx: IPluginContext): IUI {
         }
 
         case AgentEventType.TOOL_ERROR: {
+          const errMsg = stripAnsiEscapes((payload?.error as string) ?? "unknown error");
           console.log(
-            `${RED}[tool error] ${payload?.name as string ?? ""}: ${payload?.error as string ?? "unknown error"}${RESET}`,
+            `${RED}[tool error] ${payload?.name as string ?? ""}: ${errMsg}${RESET}`,
           );
           break;
         }
@@ -250,6 +271,7 @@ export function createStdioPlugin(): IPlugin {
       name: "standard-function-stdio",
       version: "0.1.0-alpha",
       description: "CLI I/O plugin (Listener + UI)",
+      skandha: 'rupa' as const,
     },
 
     async factory(ctx: IPluginContext): Promise<PluginHooks> {

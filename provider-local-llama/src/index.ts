@@ -404,6 +404,7 @@ function convertMessages(
 
 function createOllamaAdapter(manager: OllamaManager): IProvider {
   return {
+    skandha: 'samjna' as const,
     id: "ollama",
     name: "Ollama (Local LLM)",
     models: manager.getModels(),
@@ -471,6 +472,7 @@ export function createLocalLlamaPlugin(): IPlugin {
       name: "@openstarry-plugin/provider-local-llama",
       version: "0.1.0-alpha",
       description: "Ollama LLM provider (local models)",
+      skandha: 'samjna' as const,
     },
 
     async factory(ctx: IPluginContext): Promise<PluginHooks> {

@@ -20,10 +20,15 @@ vi.mock("ws", () => {
   };
 });
 
-// Mock crypto.randomUUID
-vi.mock("node:crypto", () => ({
-  randomUUID: vi.fn(() => "test-uuid-1234"),
-}));
+// Mock crypto.randomUUID — preserve the rest of node:crypto for Plan52
+// Phase C dependencies (createHash / createHmac / timingSafeEqual).
+vi.mock("node:crypto", async () => {
+  const actual = await vi.importActual<typeof import("node:crypto")>("node:crypto");
+  return {
+    ...actual,
+    randomUUID: vi.fn(() => "test-uuid-1234"),
+  };
+});
 
 function createMockSession(id?: string) {
   return {
@@ -306,7 +311,7 @@ describe("WebSocket Session Handshake", () => {
     const messageHandler = getHandler(mockClient, "message");
     expect(messageHandler).toBeDefined();
 
-    messageHandler(JSON.stringify({ type: "user_input", payload: { text: "Hello" } }));
+    await messageHandler(JSON.stringify({ type: "user_input", payload: { text: "Hello" } }));
 
     expect(ctx.pushInput).toHaveBeenCalledWith(
       expect.objectContaining({

@@ -108,6 +108,7 @@ export function parseSkillFile(content: string): ParsedSkill {
  */
 function createSkillGuide(skill: ParsedSkill): IGuide {
   return {
+    skandha: 'vijnana' as const,
     id: skill.frontmatter.id,
     name: skill.frontmatter.description ?? skill.frontmatter.id,
     getSystemPrompt(): string {
@@ -124,6 +125,7 @@ export function createSkillPlugin(): IPlugin {
       name: "standard-function-skill",
       version: "0.1.0-alpha",
       description: "Markdown skill loader — reads .md files with YAML frontmatter and registers as Guide",
+      skandha: ['samskara', 'vijnana'] as const,
     },
 
     async factory(ctx: IPluginContext): Promise<PluginHooks> {

@@ -92,6 +92,7 @@ export function createMcpServerPlugin(): IPlugin {
       version: "0.4.0",
       description:
         "Expose OpenStarry tools and guides to external MCP clients via JSON-RPC 2.0",
+      skandha: 'rupa' as const,
     },
 
     async factory(ctx: IPluginContext) {
@@ -106,6 +107,7 @@ export function createMcpServerPlugin(): IPlugin {
       transport.onRequest(handler);
 
       const listener: IListener = {
+        skandha: 'rupa' as const,
         id: `mcp-server:${config.name}`,
         name: `MCP Server (${config.transport})`,
         async start() {

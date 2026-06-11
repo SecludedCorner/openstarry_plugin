@@ -34,22 +34,19 @@ export function createGuideCharacterInitPlugin(): IPlugin {
       name: "guide-character-init",
       version: "0.1.0-alpha",
       description: "Base persona / system prompt provider (識蘊)",
+      skandha: 'vijnana' as const,
     },
 
     async factory(ctx: IPluginContext): Promise<PluginHooks> {
       const config = ctx.config as Config;
       const guideId = config.guideId ?? "default-guide";
 
-      let systemPrompt: string;
-
-      if (config.characterFile) {
-        const path = resolve(ctx.workingDirectory, config.characterFile);
-        systemPrompt = await readFile(path, "utf-8");
-      } else {
-        systemPrompt = config.prompt ?? DEFAULT_PROMPT;
-      }
+      const systemPrompt: string = config.characterFile
+        ? await readFile(resolve(ctx.workingDirectory, config.characterFile), "utf-8")
+        : (config.prompt ?? DEFAULT_PROMPT);
 
       const guide: IGuide = {
+        skandha: 'vijnana' as const,
         id: guideId,
         name: `Character Guide (${guideId})`,
         getSystemPrompt: () => systemPrompt,

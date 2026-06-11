@@ -15,6 +15,7 @@ export function createTuiDashboardPlugin(): IPlugin {
       name: "tui-dashboard",
       version: "0.1.0-alpha",
       description: "TUI Dashboard for monitoring OpenStarry agents",
+      skandha: 'rupa' as const,
     },
     async factory(ctx: IPluginContext): Promise<PluginHooks> {
       let dispatch: React.Dispatch<TuiAction> | null = null;
@@ -80,6 +81,7 @@ Keyboard Shortcuts:
       }
 
       const tuiUI: IUI = {
+        skandha: 'rupa' as const,
         id: "tui-dashboard",
         name: "TUI Dashboard",
 
@@ -167,6 +169,7 @@ Keyboard Shortcuts:
 
       // IListener implementation (Plan09) — lifecycle marker only
       const tuiListener: IListener = {
+        skandha: 'rupa' as const,
         id: "tui-listener",
         name: "TUI Dashboard Listener",
         async start(): Promise<void> {

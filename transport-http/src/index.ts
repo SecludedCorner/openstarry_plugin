@@ -12,6 +12,7 @@
  */
 
 import { createServer, IncomingMessage, ServerResponse } from "node:http";
+import { createServer as createHttpsServer } from "node:https";
 import { randomUUID } from "node:crypto";
 import { createLogger } from "@openstarry/shared";
 import type {
@@ -23,6 +24,9 @@ import type {
   AgentEvent,
 } from "@openstarry/sdk";
 import { AgentEventType } from "@openstarry/sdk";
+import { PushInputAuthenticator, type PushInputAuthConfig } from "./pushinput-auth.js";
+
+export type { PushInputAuthConfig } from "./pushinput-auth.js";
 
 /** Health check configuration for HTTP transport (SSE heartbeat). */
 interface HealthCheckConfig {
@@ -41,6 +45,21 @@ interface Config {
   healthCheck?: HealthCheckConfig;
   /** Restrict CORS to specific origins. If empty/undefined, allows all origins ("*") for backward compatibility. */
   allowedOrigins?: string[];
+  /**
+   * Plan52 Phase B — TLS (mTLS-capable) server material. When provided, the
+   * listener swaps from plain HTTP to HTTPS; client cert verification is
+   * controlled by `requestCert` / `rejectUnauthorized`. Backward compatible:
+   * omitting this preserves the existing HTTP behavior.
+   */
+  tls?: {
+    readonly cert: string | Buffer;
+    readonly key: string | Buffer;
+    readonly ca?: string | Buffer | readonly (string | Buffer)[];
+    readonly requestCert?: boolean;
+    readonly rejectUnauthorized?: boolean;
+  };
+  /** Plan52 source authentication for `sourceContext` attestation. */
+  pushInputAuth?: PushInputAuthConfig;
 }
 
 interface BufferedResponse {
@@ -48,6 +67,23 @@ interface BufferedResponse {
   events: AgentEvent[];
   createdAt: number;
   complete: boolean;
+}
+
+/**
+ * SEC-R1 (Plan46 W0): type guard for POST /api/input bodies.
+ * Fail-closed JSON schema check before destructuring. Rejects non-objects,
+ * missing/non-string `text`, and non-string `requestId`/`sessionId` when
+ * present. Unknown extra fields are ignored (forward-compatible).
+ */
+function isValidInputMessage(
+  data: unknown,
+): data is { text: string; requestId?: string; sessionId?: string } {
+  if (data === null || typeof data !== "object" || Array.isArray(data)) return false;
+  const rec = data as Record<string, unknown>;
+  if (typeof rec.text !== "string") return false;
+  if (rec.requestId !== undefined && typeof rec.requestId !== "string") return false;
+  if (rec.sessionId !== undefined && typeof rec.sessionId !== "string") return false;
+  return true;
 }
 
 /** Internal type for tracking SSE connections. */
@@ -70,6 +106,7 @@ export function createHttpPlugin(): IPlugin {
       name: "transport-http",
       version: "0.1.0-alpha",
       description: "HTTP webhook transport plugin (Listener + UI)",
+      skandha: 'rupa' as const,
     },
 
     async factory(ctx: IPluginContext): Promise<PluginHooks> {
@@ -94,8 +131,9 @@ export function createHttpPlugin(): IPlugin {
       }
       const responseBuffer = new Map<string, BufferedResponse>();
       const sseConnections = new Map<string, SSEConnection>();
-      let server: ReturnType<typeof createServer> | null = null;
+      let server: ReturnType<typeof createServer> | ReturnType<typeof createHttpsServer> | null = null;
       let cleanupInterval: ReturnType<typeof setInterval> | null = null;
+      const pushInputAuth = new PushInputAuthenticator(config.pushInputAuth ?? {});
 
       // Cleanup old buffered responses periodically
       function startCleanup(): void {
@@ -139,11 +177,12 @@ export function createHttpPlugin(): IPlugin {
 
       // ─── HTTP Listener ───
       const listener: IListener = {
+        skandha: 'rupa' as const,
         id: "http-webhook-listener",
         name: "HTTP Webhook Listener",
 
         async start(): Promise<void> {
-          server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+          const requestHandler = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
             // CORS headers
             const requestOrigin = req.headers.origin as string | undefined;
             const corsOrigin = getCorsOrigin(requestOrigin);
@@ -266,7 +305,17 @@ export function createHttpPlugin(): IPlugin {
               const stop = logger.time("http.request");
               try {
                 const body = await readBody(req);
-                const { text, requestId, sessionId } = JSON.parse(body);
+                const parsed: unknown = JSON.parse(body);
+
+                // SEC-R1 (Plan46 W0): fail-closed JSON schema validation
+                if (!isValidInputMessage(parsed)) {
+                  logger.warn("Rejected malformed input message");
+                  res.writeHead(400, { "Content-Type": "application/json" });
+                  res.end(JSON.stringify({ error: "Invalid input message" }));
+                  stop();
+                  return;
+                }
+                const { text, requestId, sessionId } = parsed;
 
                 // Validate sessionId if provided
                 if (sessionId) {
@@ -284,6 +333,27 @@ export function createHttpPlugin(): IPlugin {
                   requestId ??
                   `http-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
+                // Plan52 Phase B — verify source attestation BEFORE pushInput.
+                // When pushInputAuth.enabled is false, returns frozen-empty
+                // sourceContext (legacy passthrough); we then omit the field.
+                const authResult = await pushInputAuth.verify({
+                  authorization: req.headers["authorization"] as string | undefined,
+                  "x-os-nonce": req.headers["x-os-nonce"] as string | undefined,
+                  "x-os-ts": req.headers["x-os-ts"] as string | undefined,
+                  "x-os-kid": req.headers["x-os-kid"] as string | undefined,
+                  "x-os-cap": req.headers["x-os-cap"] as string | undefined,
+                }, id);
+                if (!authResult.ok) {
+                  logger.warn("Plan52 pushInput auth rejected", {
+                    requestId: id,
+                    reason: authResult.error.message,
+                  });
+                  res.writeHead(authResult.httpStatus, { "Content-Type": "application/json" });
+                  res.end(JSON.stringify({ error: authResult.error }));
+                  stop();
+                  return;
+                }
+
                 logger.debug("Input received", {
                   requestId: id,
                   sessionId,
@@ -296,12 +366,14 @@ export function createHttpPlugin(): IPlugin {
                   complete: false,
                 });
 
+                const sourceContextKeys = Object.keys(authResult.sourceContext);
                 ctx.pushInput({
                   source: "http",
                   inputType: "user_input",
                   data: text,
                   replyTo: id,
                   sessionId,
+                  ...(sourceContextKeys.length > 0 ? { sourceContext: authResult.sourceContext } : {}),
                 });
 
                 res.writeHead(202, { "Content-Type": "application/json" });
@@ -356,10 +428,26 @@ export function createHttpPlugin(): IPlugin {
             // 404 for unknown routes
             res.writeHead(404, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ error: "Not found" }));
-          });
+          };
+
+          // Plan52 Phase B — when TLS material is configured, swap to HTTPS.
+          // mTLS client-cert verification is enabled by `requestCert: true`
+          // + `rejectUnauthorized: true`; the configured CA bundle is trusted.
+          if (config.tls) {
+            server = createHttpsServer({
+              cert: config.tls.cert,
+              key: config.tls.key,
+              ca: config.tls.ca as Buffer | string | undefined,
+              requestCert: config.tls.requestCert ?? false,
+              rejectUnauthorized: config.tls.rejectUnauthorized ?? false,
+            }, requestHandler);
+          } else {
+            server = createServer(requestHandler);
+          }
 
           server.listen(port, host, () => {
-            logger.info(`Server listening on http://${host}:${port}${basePath}`);
+            const scheme = config.tls ? "https" : "http";
+            logger.info(`Server listening on ${scheme}://${host}:${port}${basePath}`);
           });
 
           startCleanup();
@@ -388,6 +476,7 @@ export function createHttpPlugin(): IPlugin {
 
       // ─── HTTP UI (緩衝回應供輪詢) ───
       const ui: IUI = {
+        skandha: 'rupa' as const,
         id: "http-webhook-ui",
         name: "HTTP Webhook UI",
 

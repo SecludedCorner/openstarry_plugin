@@ -90,6 +90,7 @@ class ClaudeKeyManager {
 
 function createClaudeAdapter(keyManager: ClaudeKeyManager): IProvider {
   return {
+    skandha: 'samjna' as const,
     id: "claude",
     name: "Anthropic Claude",
     models: MODELS,
@@ -145,6 +146,7 @@ export function createClaudePlugin(): IPlugin {
       name: "@openstarry-plugin/provider-claude",
       version: "0.1.0-alpha",
       description: "Anthropic Claude provider using Messages API",
+      skandha: 'samjna' as const,
     },
 
     async factory(ctx: IPluginContext): Promise<PluginHooks> {

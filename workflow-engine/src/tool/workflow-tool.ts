@@ -25,6 +25,7 @@ export function createWorkflowTool(engine: WorkflowEngine): ITool {
   const service = createWorkflowService(engine);
 
   return {
+    skandha: 'samskara' as const,
     id: "workflow:execute",
     description: "Execute a declarative workflow from a YAML file. Supports multi-step orchestration with tool, service, and LLM steps.",
     parameters: WorkflowToolInputSchema as any,

@@ -30,6 +30,7 @@ export function createMcpToolBridge(
   const id = `${serverName}/${toolName}`;
 
   return {
+    skandha: 'samskara' as const,
     id,
     description,
     parameters: schema,

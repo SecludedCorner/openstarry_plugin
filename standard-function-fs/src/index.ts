@@ -44,6 +44,7 @@ function validatePath(targetPath: string, ctx: ToolContext): string {
 // ─── Tools ───
 
 const fsReadTool: ITool<{ path: string; encoding?: string }> = {
+  skandha: 'samskara' as const,
   id: "fs.read",
   description:
     "Read the contents of a file. Returns the file content as a string.",
@@ -63,6 +64,7 @@ const fsReadTool: ITool<{ path: string; encoding?: string }> = {
 };
 
 const fsWriteTool: ITool<{ path: string; content: string }> = {
+  skandha: 'samskara' as const,
   id: "fs.write",
   description:
     "Write content to a file. Creates the file if it does not exist, overwrites if it does.",
@@ -78,6 +80,7 @@ const fsWriteTool: ITool<{ path: string; content: string }> = {
 };
 
 const fsListTool: ITool<{ path: string; recursive?: boolean }> = {
+  skandha: 'samskara' as const,
   id: "fs.list",
   description:
     "List files and directories in a directory. Returns entries with type indicators.",
@@ -116,6 +119,7 @@ const fsListTool: ITool<{ path: string; recursive?: boolean }> = {
 };
 
 const fsMkdirTool: ITool<{ path: string }> = {
+  skandha: 'samskara' as const,
   id: "fs.mkdir",
   description: "Create a directory (including parent directories if needed).",
   parameters: z.object({
@@ -129,6 +133,7 @@ const fsMkdirTool: ITool<{ path: string }> = {
 };
 
 const fsDeleteTool: ITool<{ path: string }> = {
+  skandha: 'samskara' as const,
   id: "fs.delete",
   description:
     "Delete a file or directory. Directories are deleted recursively.",
@@ -155,6 +160,7 @@ export function createFsPlugin(): IPlugin {
       name: "standard-function-fs",
       version: "0.1.0-alpha",
       description: "File system tools (read, write, list, mkdir, delete)",
+      skandha: 'samskara' as const,
     },
 
     async factory(_ctx: IPluginContext): Promise<PluginHooks> {

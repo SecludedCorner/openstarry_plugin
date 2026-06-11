@@ -21,10 +21,15 @@ vi.mock("node:http", () => {
   };
 });
 
-// Mock crypto.randomUUID
-vi.mock("node:crypto", () => ({
-  randomUUID: vi.fn(() => "test-uuid-5678"),
-}));
+// Mock crypto.randomUUID — preserve the rest of node:crypto for Plan52
+// Phase B dependencies (createHash / createHmac / timingSafeEqual).
+vi.mock("node:crypto", async () => {
+  const actual = await vi.importActual<typeof import("node:crypto")>("node:crypto");
+  return {
+    ...actual,
+    randomUUID: vi.fn(() => "test-uuid-5678"),
+  };
+});
 
 function createMockSession(id?: string) {
   return {
@@ -784,6 +789,80 @@ describe("HTTP Logging", () => {
     expect(consoleErrorSpy).toHaveBeenCalled();
 
     consoleErrorSpy.mockRestore();
+    await hooks.listeners![0].stop?.();
+  });
+});
+
+// SEC-R1 (Plan46 W0) — fail-closed JSON schema validation on POST /api/input.
+describe("HTTP POST /api/input — SEC-R1 input validation", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    capturedRequestHandler = null;
+  });
+
+  it("rejects non-object body (e.g. bare number) with 400", async () => {
+    const plugin = createHttpPlugin();
+    const ctx = createMockContext();
+    const hooks = await plugin.factory(ctx);
+    await hooks.listeners![0].start?.();
+
+    const req = createMockReq("POST", "/api/input", "42");
+    const res = createMockRes();
+    await capturedRequestHandler!(req, res);
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(res.writeHead).toHaveBeenCalledWith(400, { "Content-Type": "application/json" });
+    expect(ctx.pushInput).not.toHaveBeenCalled();
+    await hooks.listeners![0].stop?.();
+  });
+
+  it("rejects body missing 'text' string with 400", async () => {
+    const plugin = createHttpPlugin();
+    const ctx = createMockContext();
+    const hooks = await plugin.factory(ctx);
+    await hooks.listeners![0].start?.();
+
+    const req = createMockReq("POST", "/api/input", JSON.stringify({ requestId: "rid" }));
+    const res = createMockRes();
+    await capturedRequestHandler!(req, res);
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(res.writeHead).toHaveBeenCalledWith(400, { "Content-Type": "application/json" });
+    expect(ctx.pushInput).not.toHaveBeenCalled();
+    await hooks.listeners![0].stop?.();
+  });
+
+  it("rejects body where 'text' is not a string with 400", async () => {
+    const plugin = createHttpPlugin();
+    const ctx = createMockContext();
+    const hooks = await plugin.factory(ctx);
+    await hooks.listeners![0].start?.();
+
+    const req = createMockReq("POST", "/api/input", JSON.stringify({ text: 123 }));
+    const res = createMockRes();
+    await capturedRequestHandler!(req, res);
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(res.writeHead).toHaveBeenCalledWith(400, { "Content-Type": "application/json" });
+    expect(ctx.pushInput).not.toHaveBeenCalled();
+    await hooks.listeners![0].stop?.();
+  });
+
+  it("accepts valid body with text and passes through to pushInput", async () => {
+    const plugin = createHttpPlugin();
+    const ctx = createMockContext();
+    const hooks = await plugin.factory(ctx);
+    await hooks.listeners![0].start?.();
+
+    const req = createMockReq("POST", "/api/input", JSON.stringify({ text: "hi" }));
+    const res = createMockRes();
+    await capturedRequestHandler!(req, res);
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(res.writeHead).toHaveBeenCalledWith(202, { "Content-Type": "application/json" });
+    expect(ctx.pushInput).toHaveBeenCalledWith(
+      expect.objectContaining({ source: "http", data: "hi" }),
+    );
     await hooks.listeners![0].stop?.();
   });
 });

@@ -60,9 +60,10 @@ function createTestContext(): IPluginContext {
     },
     services: {
       register: () => {},
-      get: (name: string) => (name === "data-processor" ? mockService : undefined),
+      get: (key: { name: string }) => (key.name === "data-processor" ? mockService : undefined),
       has: () => true,
       list: () => [mockService],
+      unregister: () => false,
     },
     // @ts-ignore - add events for testing
     _events: events,
