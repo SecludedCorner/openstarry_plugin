@@ -23,6 +23,7 @@ export class StdioServerTransport implements McpServerTransport {
     number | string,
     { resolve: (v: unknown) => void; reject: (e: Error) => void }
   >();
+  private buffer = "";
 
   async start(): Promise<void> {
     if (this.running) return;
@@ -33,15 +34,9 @@ export class StdioServerTransport implements McpServerTransport {
       terminal: false,
     });
 
-    // FIX-2026-06-11 (found by the Tenet #10 fractal e2e): readline delivers
-    // COMPLETE lines with the terminator already stripped. The previous code
-    // appended each line to a buffer and re-split on "\n" — which the buffer
-    // could never contain — so split() returned one element, pop() put it
-    // straight back as the remainder, and the dispatch loop iterated over an
-    // empty array. The stdio server transport never processed a single
-    // request since delivery. Lines are now dispatched directly.
     this.readline.on("line", (line: string) => {
-      void this.processLine(line);
+      this.buffer += line;
+      void this.processBuffer();
     });
 
     logger.info("Stdio server transport started");
@@ -95,6 +90,15 @@ export class StdioServerTransport implements McpServerTransport {
         }
       }, 30000);
     });
+  }
+
+  private async processBuffer(): Promise<void> {
+    const lines = this.buffer.split("\n");
+    this.buffer = lines.pop() ?? "";
+
+    for (const line of lines) {
+      await this.processLine(line);
+    }
   }
 
   private async processLine(line: string): Promise<void> {

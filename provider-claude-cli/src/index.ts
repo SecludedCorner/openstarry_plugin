@@ -512,16 +512,8 @@ interface ClaudeStreamLine {
   readonly message?: { content?: Array<{ type?: string; text?: string }> };
 }
 
-/** Known silently-ignored line types — anything else is "unknown" per P1-08.
- * `rate_limit_event` added FIX-2026-06-11: CLI >=2.1.170 emits it on every
- * call; informational only (rate-limit telemetry), safe to ignore. */
-const KNOWN_SILENT_TYPES: ReadonlySet<string> = new Set(["system", "api_retry", "rate_limit_event"]);
-
-/** Per-stream dedup state for mapStreamEvent (FIX-2026-06-11 double-render). */
-export interface StreamMapState {
-  /** True once any stream_event text_delta has been emitted for this stream. */
-  sawStreamDelta: boolean;
-}
+/** Known silently-ignored line types — anything else is "unknown" per P1-08. */
+const KNOWN_SILENT_TYPES: ReadonlySet<string> = new Set(["system", "api_retry"]);
 
 /**
  * Map a single Claude CLI stream-json line to an OpenStarry ProviderStreamEvent.
@@ -547,24 +539,16 @@ export interface StreamMapState {
 export function mapStreamEvent(
   line: ClaudeStreamLine,
   onUnknown?: (lineType: string) => void,
-  state?: StreamMapState,
 ): ProviderStreamEvent | null {
   if (line.type === "stream_event") {
     const delta = line.event?.delta;
     if (delta?.type === "text_delta" && typeof delta.text === "string" && delta.text.length > 0) {
-      if (state) state.sawStreamDelta = true;
       return { type: "text_delta", text: delta.text };
     }
     // ignore non-text deltas (tool_use is disabled by --disallowedTools anyway)
     return null;
   }
   if (line.type === "assistant") {
-    // FIX-2026-06-11 double-render: CLI >=2.1.14x emits BOTH incremental
-    // stream_event deltas AND a final full-message `assistant` line for the
-    // same turn. If deltas were already streamed, the assistant line is a
-    // duplicate of text the UI has already rendered — drop it. Legacy CLIs
-    // emit ONLY assistant lines; those still pass (sawStreamDelta stays false).
-    if (state?.sawStreamDelta) return null;
     // Two shapes observed across Claude CLI versions:
     //   - legacy: line.content = [{type:"text", text:"..."}, ...]
     //   - v2.1.140+: line.message.content = [{type:"text", text:"..."}, ...]
@@ -694,10 +678,6 @@ async function* streamClaudeCli(args: {
     args.logger.warn(`claude-cli stream emitted unknown line type "${lineType}" — defensive skip; re-audit may be required`);
   };
 
-  // FIX-2026-06-11: per-stream dedup state — suppresses the duplicate
-  // full-message `assistant` line when text was already streamed via deltas.
-  const streamState: StreamMapState = { sawStreamDelta: false };
-
   try {
     while (true) {
       while (pendingLines.length > 0) {
@@ -709,7 +689,7 @@ async function* streamClaudeCli(args: {
           args.logger.debug(`claude-cli non-JSON line skipped: ${line.slice(0, 80)}`);
           continue;
         }
-        const evt = mapStreamEvent(parsed, onUnknown, streamState);
+        const evt = mapStreamEvent(parsed, onUnknown);
         if (evt) {
           if (evt.type === "finish") yieldedFinish = true;
           yield evt;

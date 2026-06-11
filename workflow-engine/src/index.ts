@@ -34,15 +34,8 @@ export function createWorkflowEnginePlugin(): IPlugin {
     },
 
     factory: async (ctx: IPluginContext): Promise<PluginHooks> => {
-      // Initialize engine with plugin context.
-      // DT-MG-β (v0.58.0-alpha): opt-in execution-state persistence — set
-      // OPENSTARRY_WORKFLOW_STATE_DIR to persist every result JSON to disk
-      // and make getStatus() survive the process. Unset = pre-v0.58 MVP.
-      const persistDir = process.env["OPENSTARRY_WORKFLOW_STATE_DIR"];
-      const engine = new WorkflowEngine(
-        ctx,
-        persistDir && persistDir.length > 0 ? { persistDir } : {},
-      );
+      // Initialize engine with plugin context
+      const engine = new WorkflowEngine(ctx);
 
       // Register as service for other plugins
       const service = createWorkflowService(engine);
@@ -58,9 +51,7 @@ export function createWorkflowEnginePlugin(): IPlugin {
         tools: [tool],
         commands: [command],
         dispose: async () => {
-          // In-memory state is ephemeral; with OPENSTARRY_WORKFLOW_STATE_DIR
-          // set, results are already on disk (written synchronously at
-          // completion/failure) — nothing to flush here.
+          // No cleanup needed in MVP (ephemeral execution)
         },
       };
     },
