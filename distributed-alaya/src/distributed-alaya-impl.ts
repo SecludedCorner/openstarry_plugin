@@ -29,6 +29,7 @@ import type {
   IAlayaSnapshot,
 } from "@openstarry/sdk";
 import type { BijaStoreImpl } from "./bija-store.js";
+import type { IRemoteAlayaPeer, AlayaVectorClock } from "./remote-peer.js";
 
 type Unsubscribe = () => void;
 
@@ -44,6 +45,11 @@ interface PropagationTarget {
 
 export class DistributedAlayaImpl implements IDistributedAlaya {
   private readonly targets = new Map<string, PropagationTarget>();
+  // TENET-2026-06-11: REAL remote peers (cross-process, daemon IPC) alongside
+  // the in-process PropagationTargets. Impl-level only — the FROZEN
+  // IDistributedAlaya SDK interface is untouched (same precedent as
+  // BijaStoreImpl.accept).
+  private readonly remotePeers = new Map<string, IRemoteAlayaPeer>();
   private readonly subscribers: Array<{ filter: SeedFilter; callback: SeedCallback }> = [];
 
   constructor(
@@ -59,6 +65,53 @@ export class DistributedAlayaImpl implements IDistributedAlaya {
    */
   registerTarget(target: PropagationTarget): void {
     this.targets.set(target.agentId, target);
+  }
+
+  /** TENET-2026-06-11: register a cross-process peer (daemon IPC). */
+  registerRemotePeer(peer: IRemoteAlayaPeer): void {
+    this.remotePeers.set(peer.agentId, peer);
+  }
+
+  unregisterRemotePeer(agentId: string): void {
+    const peer = this.remotePeers.get(agentId);
+    if (peer) {
+      peer.close();
+      this.remotePeers.delete(agentId);
+    }
+  }
+
+  /** Close all remote peer connections (plugin dispose path). */
+  closeRemotePeers(): void {
+    for (const [, peer] of this.remotePeers) peer.close();
+    this.remotePeers.clear();
+  }
+
+  /**
+   * TENET-2026-06-11: receiver side of cross-process propagation.
+   * Called by the daemon's `alaya.acceptSeed` RPC handler. The seed crossed
+   * an OS process boundary as JSON — verification here uses THIS process's
+   * own copy of the daemon-distributed cluster key, making it a genuine
+   * cross-boundary integrity check (not the sender re-verifying itself).
+   * Fail-closed: malformed shape or invalid signature rejects, store untouched.
+   */
+  async acceptRemote(seed: ISeed, vectorClock: AlayaVectorClock): Promise<void> {
+    if (
+      typeof seed !== "object" || seed === null ||
+      typeof seed.seedId !== "string" || seed.seedId.length === 0 ||
+      typeof seed.agentId !== "string" || seed.agentId.length === 0 ||
+      typeof seed.signature !== "string" || seed.signature.length === 0 ||
+      typeof vectorClock !== "object" || vectorClock === null
+    ) {
+      throw new Error("alaya.acceptRemote: malformed seed or vector clock (fail-closed)");
+    }
+
+    const isValid = await this.signatureService.verify(seed);
+    if (!isValid) {
+      throw new Error(`alaya.acceptRemote: HMAC verification failed for seed ${seed.seedId} (fail-closed)`);
+    }
+
+    await this.bijaStore.accept(seed);
+    this.bijaStore.mergeVectorClock(vectorClock as Record<string, number>);
   }
 
   async plant(seed: ISeed): Promise<void> {
@@ -105,7 +158,8 @@ export class DistributedAlayaImpl implements IDistributedAlaya {
 
     for (const targetId of targetAgentIds) {
       const target = this.targets.get(targetId);
-      if (!target) continue;
+      const remotePeer = target ? undefined : this.remotePeers.get(targetId);
+      if (!target && !remotePeer) continue;
 
       // Build signed seed for acceptance
       const signedSeed: ISeed = { ...request.seed, signature: request.signature };
@@ -117,9 +171,17 @@ export class DistributedAlayaImpl implements IDistributedAlaya {
       if (!isValid) continue;
 
       try {
-        // Accept into target's store — preserves original agentId (no F-8 tautology)
-        await target.store.accept(signedSeed);
-        target.store.mergeVectorClock(request.vectorClock);
+        if (target) {
+          // In-process target — accept into its store directly.
+          // Preserves original agentId (no F-8 tautology).
+          await target.store.accept(signedSeed);
+          target.store.mergeVectorClock(request.vectorClock);
+        } else {
+          // TENET-2026-06-11: REMOTE peer — the seed leaves this process as
+          // JSON over the peer daemon's IPC socket; the receiver verifies
+          // independently with its own cluster-key copy (acceptRemote).
+          await remotePeer!.deliver(signedSeed, request.vectorClock, this.agentId);
+        }
       } catch {
         // fail-closed: propagation failure does not propagate exception
       }

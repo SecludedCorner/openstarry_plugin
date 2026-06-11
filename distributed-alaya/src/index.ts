@@ -22,12 +22,16 @@ import { SERVICE_KEYS } from "@openstarry/sdk";
 import { SeedSignatureServiceImpl, DaemonKeyProvider, RandomKeyProvider } from "./seed-signature.js";
 import { createBijaStore } from "./bija-store.js";
 import { createDistributedAlaya } from "./distributed-alaya-impl.js";
+import { IpcRemotePeer } from "./remote-peer.js";
 
 export { createSeedSignatureService, DaemonKeyProvider, RandomKeyProvider } from "./seed-signature.js";
 export type { ISeedKeyProvider } from "./seed-signature.js";
 export { createBijaStore } from "./bija-store.js";
 export { createDistributedAlaya } from "./distributed-alaya-impl.js";
 export type { PlantError } from "./bija-store.js";
+// TENET-2026-06-11: cross-process peer surface
+export { IpcRemotePeer } from "./remote-peer.js";
+export type { IRemoteAlayaPeer, AlayaVectorClock } from "./remote-peer.js";
 
 // Plan60 Blackboard-Alaya forward addendum (cycle 03-23; Phase 6 7/7 完工 ✅).
 // Existing surface unchanged per MR-12 既有不破壞; addendum is additive only.
@@ -48,8 +52,19 @@ export interface DistributedAlayaConfig {
    * When present, a DaemonKeyProvider is used — enabling genuine cross-agent verification.
    * When absent, falls back to RandomKeyProvider (pre-Plan40 standalone behavior).
    * MUST NOT be logged.
+   *
+   * TENET-2026-06-11: when running under the daemon, daemon-entry injects this
+   * automatically from the cluster key — DaemonKeyProvider is finally
+   * daemon-distributed in fact, not just in name.
    */
   readonly hmacKeyHex?: string;
+  /**
+   * TENET-2026-06-11: cross-process peers (daemon IPC endpoints). Each entry
+   * registers an IpcRemotePeer so propagate() can deliver signed seeds across
+   * OS process boundaries; the receiving daemon verifies independently with
+   * its own cluster-key copy. Same-host scope (named pipe / unix socket).
+   */
+  readonly peers?: ReadonlyArray<{ readonly agentId: string; readonly socketPath: string }>;
 }
 
 /**
@@ -82,6 +97,11 @@ export function createDistributedAlayaPlugin(config: DistributedAlayaConfig): IP
       const bijaStore = createBijaStore(config.agentId, signatureService);
       const alaya = createDistributedAlaya(config.agentId, bijaStore, signatureService);
 
+      // TENET-2026-06-11: register cross-process peers from config.
+      for (const peer of config.peers ?? []) {
+        alaya.registerRemotePeer(new IpcRemotePeer(peer.agentId, peer.socketPath));
+      }
+
       // pushInput pattern: notify core that IDistributedAlaya is available (N=1 consumer)
       ctx.pushInput({
         source: 'distributed-alaya',
@@ -104,6 +124,8 @@ export function createDistributedAlayaPlugin(config: DistributedAlayaConfig): IP
 
       return {
         dispose: () => {
+          // TENET-2026-06-11: close remote peer connections first
+          alaya.closeRemotePeers();
           // SEC-002: zero HMAC key material on shutdown
           signatureService.clear();
           if (keyProvider instanceof DaemonKeyProvider) {
