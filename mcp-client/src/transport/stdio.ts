@@ -28,10 +28,17 @@ export class StdioTransport implements McpTransport {
   async connect(): Promise<void> {
     const mergedEnv = { ...process.env, ...this.env };
 
+    // FIX-2026-06-11: shell only for .cmd/.bat shims (npx.cmd etc.).
+    // Unconditional shell:true on win32 broke any command path containing
+    // spaces ("C:\Program Files\nodejs\node.exe" — i.e. the default node
+    // install) because cmd.exe re-tokenizes the line. Real executables
+    // spawn directly; batch shims still get the shell they require.
+    const needsShell =
+      process.platform === "win32" && /\.(cmd|bat)$/i.test(this.command);
     this.process = spawn(this.command, this.args, {
       stdio: ["pipe", "pipe", "pipe"],
       env: mergedEnv,
-      shell: process.platform === "win32",
+      shell: needsShell,
     });
 
     this.process.stdout!.on("data", (chunk: Buffer) => {
