@@ -41,10 +41,131 @@ async function fetchModels(baseUrl: string): Promise<ModelInfo[]> {
   }
 }
 
+// ─── Pure helpers (extracted for unit testing; wire behavior identical) ───
+
+/**
+ * Shape of a single OpenAI-compatible streaming chunk (`chat.completion.chunk`)
+ * as emitted by LM Studio over SSE. Only the fields this provider reads.
+ */
+export interface OpenAiStreamChunk {
+  choices?: { delta: { content?: string }; finish_reason?: string | null }[];
+  usage?: {
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+  };
+  [key: string]: unknown;
+}
+
+/** Result of classifying one SSE line. */
+export type SseLineResult =
+  | { kind: "chunk"; chunk: OpenAiStreamChunk }
+  | { kind: "done" }
+  | { kind: "skip" };
+
+/**
+ * Classify a single SSE line (pure function — extracted for unit testing).
+ *
+ * Wire-identical to the previous inline logic:
+ *   - blank lines, non-`data: ` lines, and malformed JSON → `skip` (silent)
+ *   - `data: [DONE]` sentinel → `done` (informational; the finish event
+ *     derives from `finish_reason`, never from `[DONE]`)
+ *   - `data: {json}` → `chunk` with the parsed payload
+ *
+ * Note the prefix check requires `"data: "` WITH the trailing space, matching
+ * the original code; `data:{...}` (no space) is skipped.
+ */
+export function parseSseLine(line: string): SseLineResult {
+  const trimmed = line.trim();
+  if (!trimmed) return { kind: "skip" };
+  if (trimmed === "data: [DONE]") return { kind: "done" };
+  if (!trimmed.startsWith("data: ")) return { kind: "skip" };
+
+  try {
+    return { kind: "chunk", chunk: JSON.parse(trimmed.slice(6)) as OpenAiStreamChunk };
+  } catch {
+    return { kind: "skip" };
+  }
+}
+
+/**
+ * Map one parsed OpenAI-compatible chunk to OpenStarry ProviderStreamEvents
+ * (pure function — extracted for unit testing).
+ *
+ * Mapping preserved exactly from the previous inline logic:
+ *   - missing/empty `choices` → no events
+ *   - truthy `choices[0].delta.content` → `text_delta` (empty string skipped)
+ *   - truthy `choices[0].finish_reason` → `finish`; stopReason is
+ *     `"max_tokens"` for `finish_reason === "length"`, `"end_turn"` for every
+ *     other truthy value (`"stop"`, `"tool_calls"`, ...); `null` → no finish
+ *   - `chunk.usage` (when present on the finish chunk) → TokenUsage
+ *
+ * Faithful-extraction note: like the original inline code, this accesses
+ * `choices[0].delta.content` without guarding `delta` itself — a chunk whose
+ * first choice lacks `delta` throws TypeError, which the consuming generator's
+ * try/catch converts into an `error` event (pre-existing behavior preserved).
+ */
+export function mapOpenAiChunk(chunk: OpenAiStreamChunk): ProviderStreamEvent[] {
+  const events: ProviderStreamEvent[] = [];
+
+  const choices = chunk.choices;
+  if (!choices || choices.length === 0) return events;
+
+  const delta = choices[0].delta;
+  if (delta.content) {
+    events.push({ type: "text_delta", text: delta.content });
+  }
+
+  if (choices[0].finish_reason) {
+    const usage = chunk.usage;
+    events.push({
+      type: "finish",
+      stopReason: choices[0].finish_reason === "length" ? "max_tokens" : "end_turn",
+      usage: usage
+        ? {
+            promptTokens: usage.prompt_tokens,
+            completionTokens: usage.completion_tokens,
+            totalTokens: usage.total_tokens,
+          }
+        : undefined,
+    });
+  }
+
+  return events;
+}
+
+/**
+ * Build the OpenAI-compatible request payload for `POST /chat/completions`
+ * (pure function — extracted for unit testing).
+ *
+ * Key order (model, messages, stream, max_tokens?, temperature?) matches the
+ * previous inline construction so `JSON.stringify` emits identical bytes.
+ * `maxTokens`/`temperature` use `!== undefined` checks (0 is forwarded).
+ */
+export function buildPayload(request: ChatRequest): Record<string, unknown> {
+  const payload: Record<string, unknown> = {
+    model: request.model,
+    messages: convertMessages(request.messages, request.systemPrompt),
+    stream: true,
+  };
+
+  if (request.maxTokens !== undefined) {
+    payload.max_tokens = request.maxTokens;
+  }
+  if (request.temperature !== undefined) {
+    payload.temperature = request.temperature;
+  }
+
+  return payload;
+}
+
 /**
  * LM Studio Provider — OpenAI-compatible local inference server.
+ *
+ * Exported for unit/integration testing (stubbed global fetch); production
+ * consumers go through `createLmStudioPlugin()` as before.
  */
-class LmStudioProvider implements IProvider {
+export class LmStudioProvider implements IProvider {
   public readonly skandha = 'samjna' as const;
   public readonly id = "lmstudio";
   public readonly name = "LM Studio (Local)";
@@ -69,20 +190,7 @@ class LmStudioProvider implements IProvider {
       return;
     }
 
-    const messages = convertMessages(request.messages, request.systemPrompt);
-
-    const payload: Record<string, unknown> = {
-      model: request.model,
-      messages,
-      stream: true,
-    };
-
-    if (request.maxTokens !== undefined) {
-      payload.max_tokens = request.maxTokens;
-    }
-    if (request.temperature !== undefined) {
-      payload.temperature = request.temperature;
-    }
+    const payload = buildPayload(request);
 
     let response: Response;
     try {
@@ -126,43 +234,15 @@ class LmStudioProvider implements IProvider {
         buffer = lines.pop() || "";
 
         for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed || trimmed === "data: [DONE]") continue;
-          if (!trimmed.startsWith("data: ")) continue;
+          const parsed = parseSseLine(line);
+          // "done" ([DONE] sentinel) and "skip" are both wire-level no-ops,
+          // exactly as before extraction: the finish event derives from
+          // finish_reason, never from [DONE].
+          if (parsed.kind !== "chunk") continue;
 
-          let chunk: Record<string, unknown>;
-          try {
-            chunk = JSON.parse(trimmed.slice(6));
-          } catch {
-            continue;
-          }
-
-          const choices = chunk.choices as
-            | { delta: { content?: string }; finish_reason?: string }[]
-            | undefined;
-          if (!choices || choices.length === 0) continue;
-
-          const delta = choices[0].delta;
-          if (delta.content) {
-            yield { type: "text_delta", text: delta.content };
-          }
-
-          if (choices[0].finish_reason) {
-            const usage = chunk.usage as
-              | { prompt_tokens: number; completion_tokens: number; total_tokens: number }
-              | undefined;
-            yield {
-              type: "finish",
-              stopReason: choices[0].finish_reason === "length" ? "max_tokens" : "end_turn",
-              usage: usage
-                ? {
-                    promptTokens: usage.prompt_tokens,
-                    completionTokens: usage.completion_tokens,
-                    totalTokens: usage.total_tokens,
-                  }
-                : undefined,
-            };
-            return;
+          for (const event of mapOpenAiChunk(parsed.chunk)) {
+            yield event;
+            if (event.type === "finish") return;
           }
         }
       }
@@ -179,8 +259,13 @@ class LmStudioProvider implements IProvider {
 
 /**
  * Simple message converter (OpenAI-compatible format).
+ *
+ * Pure function — exported for unit testing. Behavior unchanged: optional
+ * systemPrompt becomes a leading `system` message; per message, only `text`
+ * segments are kept and joined with `\n`; messages whose joined text is
+ * empty are dropped entirely.
  */
-function convertMessages(
+export function convertMessages(
   messages: ChatRequest["messages"],
   systemPrompt?: string
 ): { role: string; content: string }[] {

@@ -5,6 +5,15 @@
  * Auto-detects Ollama at http://127.0.0.1:11434 on startup.
  *
  * NDJSON streaming (not SSE) — each line is a JSON object.
+ *
+ * **2026-06-12 hardening (task #21 地端硬化)**: stream mapping extracted into
+ * pure named exports (`parseOllamaLine` / `mapOllamaChunk` / `mapStopReason` /
+ * `buildOllamaPayload` / `convertMessages`) following the provider-claude-cli
+ * idiom (buildArgv / mapStreamEvent pattern) so the NDJSON wire protocol is
+ * unit-testable without a live Ollama. The three formerly-duplicated
+ * finish-yield sites (main loop / final-buffer remnant / no-done fallback)
+ * are consolidated into ONE mapper code path; the `hasYieldedFinish` dedup
+ * guard lives in `OllamaStreamState` and survives across all sites.
  */
 
 import { randomBytes } from "node:crypto";
@@ -56,7 +65,7 @@ interface OllamaMessage {
   }>;
 }
 
-interface OllamaChatRequest {
+export interface OllamaChatRequest {
   model: string;
   messages: OllamaMessage[];
   stream: boolean;
@@ -73,11 +82,11 @@ interface OllamaChatRequest {
   }>;
 }
 
-interface OllamaChatChunk {
-  model: string;
+export interface OllamaChatChunk {
+  model?: string;
   message?: {
-    role: string;
-    content: string;
+    role?: string;
+    content?: string;
     tool_calls?: Array<{
       function: {
         name: string;
@@ -85,7 +94,7 @@ interface OllamaChatChunk {
       };
     }>;
   };
-  done: boolean;
+  done?: boolean;
   total_duration?: number;
   eval_count?: number;
   prompt_eval_count?: number;
@@ -170,11 +179,148 @@ class OllamaManager {
   }
 }
 
+// ─── Pure stream mapping (extracted 2026-06-12 hardening) ───
+
+/**
+ * Per-stream mutable state threaded through `mapOllamaChunk` (claude-cli
+ * `StreamMapState` pattern). Carries the finish-dedup guard and the
+ * tool-presence flag that decides the final `stopReason`.
+ */
+export interface OllamaStreamState {
+  /** True once a `finish` event has been emitted for this stream. */
+  hasYieldedFinish: boolean;
+  /** True once any chunk in this stream carried tool_calls. */
+  pendingToolCalls: boolean;
+}
+
+/** Fresh per-stream state. One per `callOllamaStream` invocation. */
+export function createOllamaStreamState(): OllamaStreamState {
+  return { hasYieldedFinish: false, pendingToolCalls: false };
+}
+
+/**
+ * Parse one NDJSON line into an OllamaChatChunk.
+ *
+ * Returns null for blank lines and malformed JSON — preserving the legacy
+ * "malformed NDJSON silently skipped" wire behaviour (the stream stays
+ * alive; one bad line never kills inference).
+ */
+export function parseOllamaLine(line: string): OllamaChatChunk | null {
+  const trimmed = line.trim();
+  if (!trimmed) return null;
+  try {
+    return JSON.parse(trimmed) as OllamaChatChunk;
+  } catch {
+    return null; // Ignore parse errors (legacy behaviour)
+  }
+}
+
+/**
+ * Map the tool-presence flag to the finish stopReason.
+ * Tool calls anywhere in the stream → "tool_use"; otherwise "end_turn".
+ */
+export function mapStopReason(
+  pendingToolCalls: boolean,
+): "end_turn" | "tool_use" {
+  return pendingToolCalls ? "tool_use" : "end_turn";
+}
+
+/** Default tool-call id generator — 8 random bytes hex (16 chars). */
+function genDefaultToolCallId(): string {
+  return randomBytes(8).toString("hex");
+}
+
+/**
+ * Map a single parsed Ollama chunk to zero-or-more ProviderStreamEvents.
+ *
+ * THE single mapping code path — the streaming loop, the final-buffer
+ * remnant flush and (via `mapStopReason`) the no-done fallback all route
+ * through here, replacing the three formerly-duplicated finish-yield sites.
+ *
+ * Semantics preserved from the legacy inline loop:
+ *   - `message.content` (non-empty) → one `text_delta`.
+ *   - each `message.tool_calls[]` entry → `tool_call_start` /
+ *     `tool_call_delta` / `tool_call_end` triplet sharing one random hex id;
+ *     `input` = JSON.stringify of the arguments object on both delta + end.
+ *   - `done: true` → one `finish` (dedup-guarded by `state.hasYieldedFinish`);
+ *     `stopReason` = "tool_use" iff any tool_calls were seen earlier in the
+ *     stream; `usage` mapped from `prompt_eval_count` / `eval_count` only
+ *     when `eval_count` is truthy (legacy: 0 / absent → usage undefined).
+ *
+ * @param genToolCallId test seam — injectable id generator (defaults to
+ *   crypto randomBytes; production call sites never pass it).
+ */
+export function mapOllamaChunk(
+  chunk: OllamaChatChunk,
+  state: OllamaStreamState,
+  genToolCallId: () => string = genDefaultToolCallId,
+): ProviderStreamEvent[] {
+  const events: ProviderStreamEvent[] = [];
+
+  if (chunk.message?.content && chunk.message.content.length > 0) {
+    events.push({ type: "text_delta", text: chunk.message.content });
+  }
+
+  if (chunk.message?.tool_calls && chunk.message.tool_calls.length > 0) {
+    state.pendingToolCalls = true;
+    for (const tc of chunk.message.tool_calls) {
+      const tcId = genToolCallId();
+      const input = JSON.stringify(tc.function.arguments);
+      events.push({
+        type: "tool_call_start",
+        toolCallId: tcId,
+        name: tc.function.name,
+      });
+      events.push({
+        type: "tool_call_delta",
+        toolCallId: tcId,
+        input,
+      });
+      events.push({
+        type: "tool_call_end",
+        toolCallId: tcId,
+        name: tc.function.name,
+        input,
+      });
+    }
+  }
+
+  if (chunk.done && !state.hasYieldedFinish) {
+    events.push({
+      type: "finish",
+      stopReason: mapStopReason(state.pendingToolCalls),
+      usage: chunk.eval_count
+        ? {
+            promptTokens: chunk.prompt_eval_count ?? 0,
+            completionTokens: chunk.eval_count,
+          }
+        : undefined,
+    });
+    state.hasYieldedFinish = true;
+  }
+
+  return events;
+}
+
 // ─── Ollama API Streaming ───
 
-async function* callOllamaStream(
+/**
+ * POST {hostUrl}/api/chat and stream ProviderStreamEvents from the NDJSON
+ * response. Exported for integration testing with a stubbed global fetch.
+ *
+ * Error paths (wire-identical to the legacy implementation):
+ *   - HTTP !ok        → `error` event `Ollama API error: <status> <body>`
+ *   - missing body    → `error` event `No response body`
+ *   - mid-stream read failure → `error` event with the underlying Error
+ *   - fetch rejection (e.g. connection refused) propagates as a generator
+ *     rejection (NOT an error event) — legacy behaviour preserved.
+ *
+ * @param _model retained for call-site compatibility; the model travels
+ *   inside `request.model` (legacy signature had the same unused param).
+ */
+export async function* callOllamaStream(
   hostUrl: string,
-  model: string,
+  _model: string,
   request: OllamaChatRequest,
 ): AsyncGenerator<ProviderStreamEvent> {
   const endpoint = `${hostUrl}/api/chat`;
@@ -202,13 +348,7 @@ async function* callOllamaStream(
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
-  let hasYieldedFinish = false;
-  let pendingToolCalls = false;
-
-  const toolCallMap = new Map<
-    string,
-    { name: string; args: Record<string, unknown> }
-  >();
+  const state = createOllamaStreamState();
 
   try {
     while (true) {
@@ -220,89 +360,25 @@ async function* callOllamaStream(
       buffer = lines.pop() ?? "";
 
       for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-
-        try {
-          const chunk = JSON.parse(trimmed) as OllamaChatChunk;
-
-          if (chunk.message?.content && chunk.message.content.length > 0) {
-            yield { type: "text_delta", text: chunk.message.content };
-          }
-
-          if (chunk.message?.tool_calls && chunk.message.tool_calls.length > 0) {
-            pendingToolCalls = true;
-            for (const tc of chunk.message.tool_calls) {
-              const tcId = randomBytes(8).toString("hex");
-              toolCallMap.set(tcId, {
-                name: tc.function.name,
-                args: tc.function.arguments,
-              });
-
-              yield {
-                type: "tool_call_start",
-                toolCallId: tcId,
-                name: tc.function.name,
-              };
-              yield {
-                type: "tool_call_delta",
-                toolCallId: tcId,
-                input: JSON.stringify(tc.function.arguments),
-              };
-              yield {
-                type: "tool_call_end",
-                toolCallId: tcId,
-                name: tc.function.name,
-                input: JSON.stringify(tc.function.arguments),
-              };
-            }
-          }
-
-          if (chunk.done && !hasYieldedFinish) {
-            const stopReason = pendingToolCalls ? "tool_use" : "end_turn";
-            yield {
-              type: "finish",
-              stopReason: stopReason as "end_turn" | "tool_use",
-              usage: chunk.eval_count
-                ? {
-                    promptTokens: chunk.prompt_eval_count ?? 0,
-                    completionTokens: chunk.eval_count,
-                  }
-                : undefined,
-            };
-            hasYieldedFinish = true;
-          }
-        } catch {
-          // Ignore parse errors
-        }
+        const chunk = parseOllamaLine(line);
+        if (chunk === null) continue;
+        yield* mapOllamaChunk(chunk, state);
       }
     }
 
-    // Handle remaining buffer
-    if (buffer.trim()) {
-      try {
-        const chunk = JSON.parse(buffer.trim()) as OllamaChatChunk;
-        if (chunk.message?.content && chunk.message.content.length > 0) {
-          yield { type: "text_delta", text: chunk.message.content };
-        }
-        if (chunk.done && !hasYieldedFinish) {
-          const stopReason = pendingToolCalls ? "tool_use" : "end_turn";
-          yield {
-            type: "finish",
-            stopReason: stopReason as "end_turn" | "tool_use",
-          };
-          hasYieldedFinish = true;
-        }
-      } catch {
-        // Ignore
-      }
+    // Final-buffer remnant (stream ended without trailing newline) — same
+    // single mapper path as the main loop (consolidated 2026-06-12; the
+    // legacy inline remnant handler dropped usage and ignored tool_calls).
+    const remnant = parseOllamaLine(buffer);
+    if (remnant !== null) {
+      yield* mapOllamaChunk(remnant, state);
     }
 
-    if (!hasYieldedFinish) {
-      const stopReason = pendingToolCalls ? "tool_use" : "end_turn";
+    // Defensive close: stream ended without any done:true chunk.
+    if (!state.hasYieldedFinish) {
       yield {
         type: "finish",
-        stopReason: stopReason as "end_turn" | "tool_use",
+        stopReason: mapStopReason(state.pendingToolCalls),
       };
     }
   } catch (err) {
@@ -315,7 +391,21 @@ async function* callOllamaStream(
 
 // ─── Message Conversion ───
 
-function convertMessages(
+/**
+ * Convert OpenStarry messages (+ optional systemPrompt) into Ollama chat
+ * messages. Pure function — exported for unit testing.
+ *
+ * Semantics (legacy-preserved):
+ *   - `system` messages collect their text and OVERRIDE the systemPrompt
+ *     parameter (last system message wins); emitted as a single prepended
+ *     `system` message.
+ *   - `user` / `assistant` text segments join with "\n"; empty-text
+ *     messages are dropped.
+ *   - assistant `tool_call` segments map to Ollama `tool_calls` (the
+ *     assistant message is kept even when its text is empty).
+ *   - `tool` messages join their `tool_result` payloads with "\n".
+ */
+export function convertMessages(
   messages: Message[],
   systemPrompt?: string,
 ): OllamaMessage[] {
@@ -400,6 +490,41 @@ function convertMessages(
   return ollamaMessages;
 }
 
+/**
+ * Build the Ollama /api/chat payload from an OpenStarry ChatRequest.
+ * Pure function — exported for unit testing.
+ *
+ * Legacy-preserved details: `stream` always true; `options.temperature`
+ * forwarded as-is (undefined temperature keeps `options: {}` on the wire
+ * after JSON.stringify); `tools` only present when the request carries a
+ * non-empty tool list.
+ */
+export function buildOllamaPayload(request: ChatRequest): OllamaChatRequest {
+  const messages = convertMessages(request.messages, request.systemPrompt);
+
+  let tools: OllamaChatRequest["tools"] = undefined;
+  if (request.tools && request.tools.length > 0) {
+    tools = request.tools.map((t) => ({
+      type: "function" as const,
+      function: {
+        name: t.name,
+        description: t.description,
+        parameters: t.parameters,
+      },
+    }));
+  }
+
+  return {
+    model: request.model,
+    messages,
+    stream: true,
+    options: {
+      temperature: request.temperature,
+    },
+    tools,
+  };
+}
+
 // ─── Provider Adapter ───
 
 function createOllamaAdapter(manager: OllamaManager): IProvider {
@@ -427,29 +552,7 @@ function createOllamaAdapter(manager: OllamaManager): IProvider {
         return;
       }
 
-      const messages = convertMessages(request.messages, request.systemPrompt);
-
-      let tools: OllamaChatRequest["tools"] = undefined;
-      if (request.tools && request.tools.length > 0) {
-        tools = request.tools.map((t) => ({
-          type: "function" as const,
-          function: {
-            name: t.name,
-            description: t.description,
-            parameters: t.parameters,
-          },
-        }));
-      }
-
-      const ollamaRequest: OllamaChatRequest = {
-        model: request.model,
-        messages,
-        stream: true,
-        options: {
-          temperature: request.temperature,
-        },
-        tools,
-      };
+      const ollamaRequest = buildOllamaPayload(request);
 
       yield* callOllamaStream(
         manager.getHostUrl(),
