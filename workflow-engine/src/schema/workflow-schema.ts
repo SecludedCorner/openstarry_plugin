@@ -76,21 +76,6 @@ const InferenceStepSchema = BaseStepSchema.extend({
 });
 
 /**
- * Loop step schema (DT-MG-α, added v0.58.0-alpha).
- *
- * Exactly-one-of(over, while) is enforced at execution time (engine throws
- * a WorkflowExecutionError) because zod discriminated unions cannot carry
- * a refine() member. maxIterations is a mandatory hard cap.
- */
-const LoopStepSchema = BaseStepSchema.extend({
-  type: z.literal("loop"),
-  over: z.string().min(1).optional(),
-  while: z.string().min(1).optional(),
-  maxIterations: z.number().int().positive().max(1000),
-  steps: z.array(z.lazy((): z.ZodTypeAny => StepSchema)).min(1),
-});
-
-/**
  * Discriminated union of all step types.
  */
 const StepSchema = z.discriminatedUnion("type", [
@@ -99,7 +84,6 @@ const StepSchema = z.discriminatedUnion("type", [
   LLMStepSchema,
   CommandStepSchema,
   InferenceStepSchema,
-  LoopStepSchema,
 ]);
 
 /**

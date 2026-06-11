@@ -58,7 +58,7 @@ export interface IWorkflowStepBase {
   name: string;
 
   /** Step type discriminator */
-  type: "tool" | "service" | "llm" | "command" | "inference" | "loop";
+  type: "tool" | "service" | "llm" | "command" | "inference";
 
   /** Output variable name (optional, default: steps.<name>) */
   output?: string;
@@ -153,52 +153,9 @@ export interface IInferenceStep extends IWorkflowStepBase {
 }
 
 /**
- * Loop step — repeats nested steps (DT-MG-α, added v0.58.0-alpha).
- *
- * Exactly ONE of `over` (foreach mode) or `while` (condition mode) must be
- * set. `maxIterations` is a mandatory hard cap in both modes; exceeding it
- * throws (no silent truncation). Inside iterations the interpolation
- * context exposes `{{loop.index}}` and (foreach only) `{{loop.item}}`.
- */
-export interface ILoopStep extends IWorkflowStepBase {
-  type: "loop";
-
-  /**
-   * Foreach mode: path to an array, either as a single Mustache tag
-   * (`"{{inputs.items}}"`) or a bare dot-path (`"inputs.items"`).
-   * Resolved against the execution context to the RAW array value.
-   */
-  over?: string;
-
-  /**
-   * While mode: Mustache template re-rendered before each iteration;
-   * the loop continues while it renders to the exact string "true".
-   */
-  while?: string;
-
-  /** Mandatory hard cap on iterations (1..1000). */
-  maxIterations: number;
-
-  /** Nested steps executed each iteration (any step type, including loop). */
-  steps: IWorkflowStep[];
-}
-
-/**
  * Discriminated union of all step types.
  */
-export type IWorkflowStep = IToolStep | IServiceStep | ILLMStep | ICommandStep | IInferenceStep | ILoopStep;
-
-/**
- * Per-iteration record collected as a loop step's result (DT-MG-α).
- */
-export interface ILoopIterationRecord {
-  /** Zero-based iteration index. */
-  index: number;
-  /** Foreach mode: the array element for this iteration. */
-  item?: unknown;
-  /** Inner step results captured at the end of this iteration, keyed by step name. */
-  steps: Record<string, unknown>;
-}
+export type IWorkflowStep = IToolStep | IServiceStep | ILLMStep | ICommandStep | IInferenceStep;
 
 /**
  * Workflow execution result.

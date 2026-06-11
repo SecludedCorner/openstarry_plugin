@@ -11,8 +11,8 @@ Mustache.escape = (value: string) => value;
 /** Maximum recursion depth for nested object interpolation (SEC-032-003). */
 const MAX_INTERPOLATION_DEPTH = 10;
 
-/** Allowed top-level context keys (SEC-032-003; "loop" added for DT-MG-α loop steps). */
-const ALLOWED_CONTEXT_KEYS = new Set(["inputs", "steps", "loop"]);
+/** Allowed top-level context keys (SEC-032-003). */
+const ALLOWED_CONTEXT_KEYS = new Set(["inputs", "steps"]);
 
 /**
  * Sanitize context to only expose allowed top-level keys.
