@@ -37,6 +37,15 @@ type Unsubscribe = () => void;
 // We use a structural intersection so we do not import the concrete class as a value dependency.
 type IBijaStoreWithAccept = IBijaStore & Pick<BijaStoreImpl, 'accept'>;
 
+// verifyNonce is an impl-level method (SEC-001 / Spec Addendum 2026-06-15), NOT on the
+// FROZEN ISeedSignatureService SDK interface. Structural intersection — same precedent
+// as IBijaStoreWithAccept — so acceptRemote can use it when the concrete service provides
+// it, without a value dependency on the concrete class. Optional: a signature service
+// without verifyNonce simply skips the replay check (backward compatible).
+type SigServiceMaybeNonce = ISeedSignatureService & {
+  verifyNonce?(agentId: string, nonce: number): boolean;
+};
+
 interface PropagationTarget {
   readonly agentId: string;
   store: IBijaStoreWithAccept;
@@ -51,6 +60,11 @@ export class DistributedAlayaImpl implements IDistributedAlaya {
   // BijaStoreImpl.accept).
   private readonly remotePeers = new Map<string, IRemoteAlayaPeer>();
   private readonly subscribers: Array<{ filter: SeedFilter; callback: SeedCallback }> = [];
+
+  // Spec Addendum 2026-06-15 (ISeed Replay-Nonce): strictly-increasing per-agent
+  // nonce stamped on THIS agent's own seeds at plant() time. Seeded from wall-clock
+  // ms and bumped to stay strictly monotonic across rapid plants within a run.
+  private lastOutboundNonce = 0;
 
   constructor(
     private readonly agentId: string,
@@ -110,13 +124,40 @@ export class DistributedAlayaImpl implements IDistributedAlaya {
       throw new Error(`alaya.acceptRemote: HMAC verification failed for seed ${seed.seedId} (fail-closed)`);
     }
 
+    // Spec Addendum 2026-06-15: replay/reorder defense. The nonce lives inside the
+    // HMAC-signed canonical, so a *tampered* nonce already failed verify() above.
+    // What this guards is a *replayed* (byte-identical, still-valid) seed: its nonce
+    // is <= the last accepted nonce for this agentId. Fail-closed. Seeds without a
+    // nonce (pre-addendum senders) take the legacy path unchanged.
+    if (typeof seed.nonce === "number") {
+      const sig = this.signatureService as SigServiceMaybeNonce;
+      if (typeof sig.verifyNonce === "function" && !sig.verifyNonce(seed.agentId, seed.nonce)) {
+        throw new Error(
+          `alaya.acceptRemote: nonce replay/reorder rejected for seed ${seed.seedId} ` +
+          `(agent ${seed.agentId}, nonce ${seed.nonce}) (fail-closed)`,
+        );
+      }
+    }
+
     await this.bijaStore.accept(seed);
     this.bijaStore.mergeVectorClock(vectorClock as Record<string, number>);
   }
 
   async plant(seed: ISeed): Promise<void> {
-    // Delegates to bijaStore which enforces F-8 (agentId check)
-    await this.bijaStore.plant(seed);
+    // Spec Addendum 2026-06-15: stamp a replay-defense nonce when the caller didn't
+    // supply one. Strictly increasing per agent; gets covered by the HMAC signature
+    // applied at propagate() time. Delegates to bijaStore which enforces F-8.
+    const seedToPlant: ISeed = seed.nonce === undefined
+      ? { ...seed, nonce: this.nextOutboundNonce() }
+      : seed;
+    await this.bijaStore.plant(seedToPlant);
+  }
+
+  /** Spec Addendum 2026-06-15: next strictly-increasing outbound nonce for this agent. */
+  private nextOutboundNonce(): number {
+    const candidate = Date.now();
+    this.lastOutboundNonce = candidate > this.lastOutboundNonce ? candidate : this.lastOutboundNonce + 1;
+    return this.lastOutboundNonce;
   }
 
   async query(filter: SeedFilter, _scope?: SeedScope): Promise<ISeed[]> {

@@ -17,8 +17,10 @@
  * daemon's stable contract.
  *
  * Honest scope: same-host transport (named pipe / UDS), trusted-parent key
- * distribution, no replay nonce (ISeed is FROZEN without one; seedId
- * overwrite is last-writer-wins idempotency at N=2).
+ * distribution. Replay defense added 2026-06-15 (Spec Addendum: ISeed gains an
+ * optional `nonce`; the receiver's acceptRemote rejects a replayed/reordered
+ * seed via the signature service's per-agent monotonic verifyNonce). Still
+ * out of scope: cross-host transport, N>2 gossip, late-joiner snapshot exchange.
  */
 
 import { createConnection, type Socket } from "node:net";
