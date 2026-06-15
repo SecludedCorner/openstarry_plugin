@@ -82,10 +82,28 @@ export function createDirectiveStorage(agentId: string, overridePath?: string): 
       ensureDir();
       const store: DirectiveStore = { version: 1, directives };
       const content = JSON.stringify(store, null, 2);
-      // Atomic write: write to temp, then rename
+      // Atomic write: write to temp, then rename.
       const tmpPath = filePath + '.tmp';
       fs.writeFileSync(tmpPath, content, 'utf8');
-      fs.renameSync(tmpPath, filePath);
+      // Windows can return a transient EPERM on rename when another handle
+      // (AV scanner, indexer, a lingering reader) momentarily holds the target
+      // or the just-written temp file. Retry a few times with a tiny backoff —
+      // the rename is atomic, so a retry simply waits out the transient lock.
+      let lastErr: unknown;
+      for (let attempt = 0; attempt < 5; attempt++) {
+        try {
+          fs.renameSync(tmpPath, filePath);
+          return;
+        } catch (err) {
+          lastErr = err;
+          const code = (err as NodeJS.ErrnoException)?.code;
+          if (code !== 'EPERM' && code !== 'EACCES' && code !== 'EBUSY') throw err;
+          // brief synchronous backoff (≈1ms × attempt) before retrying
+          const until = Date.now() + (attempt + 1);
+          while (Date.now() < until) { /* spin briefly */ }
+        }
+      }
+      throw lastErr;
     },
   };
 }
