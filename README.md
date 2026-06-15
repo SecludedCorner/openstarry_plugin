@@ -6,7 +6,7 @@ Official plugin ecosystem for the [OpenStarry](https://github.com/SecludedCorner
 
 ## Overview
 
-This repository contains **44 packages — 43 loadable plugins plus one shared types library (`mcp-common`)** — that extend OpenStarry's capabilities through the **Five Aggregates (五蘊)** architecture. Each plugin is a standalone package following the factory pattern (`createXxxPlugin()` → `IPlugin` with a `manifest` + `factory(ctx)`).
+This repository contains **45 packages — 44 loadable plugins plus one shared types library (`mcp-common`)** — that extend OpenStarry's capabilities through the **Five Aggregates (五蘊)** architecture. Each plugin is a standalone package following the factory pattern (`createXxxPlugin()` → `IPlugin` with a `manifest` + `factory(ctx)`).
 
 > Canonical aggregate mapping (see the doc repo's [Deep Dive 14](https://github.com/SecludedCorner/openstarry_doc/blob/main/Agent_Core_Components_Deep_Dive/14_Agent_Core_Philosophy_Five_Aggregates.md)): **色 Form = `IRupa` = `IUI` (output) + `IListener` (input)** — a listener is a sense organ, so transports/listeners live under Form, not Sensation. **受 Sensation = `IVedana`** (feedback quality). **想 Perception = `ISamjna` = `IProvider`** (and context managers). **行 Formation = `ISamskara` = `ITool`**. **識 Consciousness = `IVijnana` = `IGuide`** (identity, governance, volition).
 
@@ -56,6 +56,7 @@ This repository contains **44 packages — 43 loadable plugins plus one shared t
 | `workflow-engine` | Workflow engine (loop/while steps + disk-backed state) |
 | `devtools` | Developer tools (inspect, debug) |
 | `agent-ask` | Exposes the cognition loop as a delegable tool (fractal composition, ledger #10) |
+| `agent-spawn` | `agent.spawnChild` tool — the agent's own loop spawning child processes (ledger #10; daemon mode only) |
 | `confirmation-gate-standard` | Tool-call confirmation gate (approve / deny / ask_user) |
 | `comm-proxy` | Fault-isolation decorator (circuit breaker + bulkhead — verification-layer) |
 
