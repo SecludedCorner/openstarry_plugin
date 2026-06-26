@@ -9,6 +9,7 @@ import type { IPlugin, IPluginContext, PluginHooks } from "@openstarry/sdk";
 import { WorkflowEngine } from "./engine/workflow-engine.js";
 import { createWorkflowService } from "./service/workflow-service.js";
 import { createWorkflowTool } from "./tool/workflow-tool.js";
+import { createWorkflowStatusTool } from "./tool/workflow-status-tool.js";
 import { createWorkflowCommand } from "./command/workflow-command.js";
 
 /**
@@ -48,14 +49,15 @@ export function createWorkflowEnginePlugin(): IPlugin {
       const service = createWorkflowService(engine);
       ctx.services?.register(service);
 
-      // Create tool for LLM invocation
+      // Create tools for LLM invocation: execute + status (Doc 12 poll-handle).
       const tool = createWorkflowTool(engine);
+      const statusTool = createWorkflowStatusTool(engine);
 
       // Create slash command for CLI usage
       const command = createWorkflowCommand(engine, ctx);
 
       return {
-        tools: [tool],
+        tools: [tool, statusTool],
         commands: [command],
         dispose: async () => {
           // In-memory state is ephemeral; with OPENSTARRY_WORKFLOW_STATE_DIR

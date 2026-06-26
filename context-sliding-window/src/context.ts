@@ -27,7 +27,12 @@ export function createContextManager(): IContextManager {
         if (conversationMessages[i].role === "user") {
           userTurnCount++;
           if (userTurnCount > maxTurns) {
-            cutIndex = i + 1;
+            // BUGFIX (v0.59.7): do NOT advance cutIndex to i+1 here — that
+            // kept the trailing assistant/tool messages of the oldest DROPPED
+            // turn (an orphaned response with no user in the window, violating
+            // the "turn pair" contract). cutIndex already points at the Nth
+            // user message from the end (set on the prior matching iteration),
+            // so we simply stop.
             break;
           }
           cutIndex = i;

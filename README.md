@@ -6,7 +6,7 @@ Official plugin ecosystem for the [OpenStarry](https://github.com/SecludedCorner
 
 ## Overview
 
-This repository contains **45 packages — 44 loadable plugins plus one shared types library (`mcp-common`)** — that extend OpenStarry's capabilities through the **Five Aggregates (五蘊)** architecture. Each plugin is a standalone package following the factory pattern (`createXxxPlugin()` → `IPlugin` with a `manifest` + `factory(ctx)`).
+This repository contains **47 packages — 46 loadable plugins plus one shared types library (`mcp-common`)** — that extend OpenStarry's capabilities through the **Five Aggregates (五蘊)** architecture. Each plugin is a standalone package following the factory pattern (`createXxxPlugin()` → `IPlugin` with a `manifest` + `factory(ctx)`).
 
 > Canonical aggregate mapping (see the doc repo's [Deep Dive 14](https://github.com/SecludedCorner/openstarry_doc/blob/main/Agent_Core_Components_Deep_Dive/14_Agent_Core_Philosophy_Five_Aggregates.md)): **色 Form = `IRupa` = `IUI` (output) + `IListener` (input)** — a listener is a sense organ, so transports/listeners live under Form, not Sensation. **受 Sensation = `IVedana`** (feedback quality). **想 Perception = `ISamjna` = `IProvider`** (and context managers). **行 Formation = `ISamskara` = `ITool`**. **識 Consciousness = `IVijnana` = `IGuide`** (identity, governance, volition).
 

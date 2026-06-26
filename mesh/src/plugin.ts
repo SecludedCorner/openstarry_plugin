@@ -5,7 +5,7 @@
  */
 
 import type { IPlugin, IPluginContext, PluginHooks } from '@openstarry/sdk';
-import { createMeshBroker, type MeshBroker, type MeshBrokerConfig } from './broker.js';
+import { createMeshBroker, type MeshBrokerConfig } from './broker.js';
 
 export type MeshPluginConfig = MeshBrokerConfig;
 
@@ -33,9 +33,10 @@ export function createMeshPlugin(): IPlugin {
         delivery: raw.delivery ?? (() => { /* no delivery sink wired — standalone boot */ }),
       };
       // Boot-time fail-fast: cycle detection + manifest integrity at construction.
-      const broker: MeshBroker = createMeshBroker(cfg);
-      const exposed = broker as MeshBroker & { __pluginAttached?: boolean };
-      exposed.__pluginAttached = true;
+      // No agent-facing hook is registered — the value of this package is the
+      // exported MeshBroker API (library-as-wrapper; see openstarry_doc
+      // Implementation_Reference/plugins.md honest note).
+      createMeshBroker(cfg);
 
       return {
         dispose: () => {

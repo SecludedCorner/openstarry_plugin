@@ -15,7 +15,7 @@
  */
 
 import type { IPlugin, IPluginContext, PluginHooks } from '@openstarry/sdk';
-import { createVasanaEngine, type VasanaEngine, type VasanaEngineConfig } from './engine.js';
+import { createVasanaEngine, type VasanaEngineConfig } from './engine.js';
 
 /**
  * Plugin manifest config — passed via `ctx.config` per OpenStarry plugin convention.
@@ -43,14 +43,11 @@ export function createVasanaEnginePlugin(): IPlugin {
     async factory(ctx: IPluginContext): Promise<PluginHooks> {
       const cfg = (ctx.config ?? {}) as VasanaEnginePluginConfig;
       // Boot-time fail-fast (D-§0-B AMEND-3): createVasanaEngine throws on
-      // chain integrity violation; do NOT swallow.
-      const engine: VasanaEngine = createVasanaEngine(cfg);
-
-      // Expose engine for downstream consumers via plugin-host context.
-      // (Container-plugin lifecycle protocol — distinct from the outer 4-method
-      // consumer surface per D-§0-B AMEND-1.)
-      const exposed = engine as VasanaEngine & { __pluginAttached?: boolean };
-      exposed.__pluginAttached = true;
+      // chain integrity violation; do NOT swallow. No agent-facing hook is
+      // registered — the value of this package is the exported VasanaEngine API
+      // (library-as-wrapper; Plan60 Track 2 read-API DEFERRED; see openstarry_doc
+      // Implementation_Reference/plugins.md honest note).
+      createVasanaEngine(cfg);
 
       return {
         // No hooks needed at this lifecycle stage; Plan60 Blackboard-Alaya read-API

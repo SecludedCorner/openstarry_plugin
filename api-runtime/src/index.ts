@@ -14,7 +14,7 @@
  */
 
 import type { IPlugin, IPluginContext, PluginHooks } from '@openstarry/sdk';
-import { createApiRuntime, type ApiRuntimeConfig, type IRuntime } from './runtime.js';
+import { createApiRuntime, type ApiRuntimeConfig } from './runtime.js';
 
 export type ApiRuntimePluginConfig = ApiRuntimeConfig;
 
@@ -30,10 +30,11 @@ export function createApiRuntimePlugin(): IPlugin {
 
     async factory(ctx: IPluginContext): Promise<PluginHooks> {
       const cfg = (ctx.config ?? {}) as unknown as ApiRuntimePluginConfig;
-      // Boot-time fail-fast inside createApiRuntime → loadHmacKey.
-      const runtime: IRuntime = createApiRuntime(cfg);
-      const exposed = runtime as IRuntime & { __pluginAttached?: boolean };
-      exposed.__pluginAttached = true;
+      // Boot-time fail-fast inside createApiRuntime → loadHmacKey (config/HMAC
+      // validated at construction). No agent-facing hook is registered — the
+      // value of this package is the exported runtime API (library-as-wrapper;
+      // see openstarry_doc Implementation_Reference/plugins.md honest note).
+      createApiRuntime(cfg);
 
       return {
         dispose: () => {

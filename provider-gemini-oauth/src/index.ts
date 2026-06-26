@@ -1158,3 +1158,15 @@ export function createGeminiOAuthPlugin(): IPlugin {
 }
 
 export default createGeminiOAuthPlugin;
+
+// ─── Test seam (v0.59.7) ───
+// Pure, side-effect-free helpers exported for unit testing. No behavior change:
+// these are the same module-private functions used by the OAuth/provider paths
+// (message conversion, PKCE challenge, provisioning metadata, model catalog).
+export const __testables = {
+  convertMessages,
+  generateCodeVerifier,
+  generateCodeChallenge,
+  buildMetadata,
+  MODELS,
+};
