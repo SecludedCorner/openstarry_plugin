@@ -6,7 +6,7 @@
 
 ## 總覽
 
-本 repo 含 **47 個套件——46 個可載入插件，加上一個共享型別庫（`mcp-common`）**，透過**五蘊**架構擴展 OpenStarry 的能力。每個插件都是獨立套件，遵循工廠模式（`createXxxPlugin()` → 帶 `manifest` ＋ `factory(ctx)` 的 `IPlugin`）。
+本 repo 含 **49 個套件——48 個可載入插件，加上一個共享型別庫（`mcp-common`）**，透過**五蘊**架構擴展 OpenStarry 的能力。每個插件都是獨立套件，遵循工廠模式（`createXxxPlugin()` → 帶 `manifest` ＋ `factory(ctx)` 的 `IPlugin`）。
 
 > canonical 蘊歸屬（見文件庫 [Deep Dive 14](https://github.com/SecludedCorner/openstarry_doc/blob/main/Agent_Core_Components_Deep_Dive/14_Agent_Core_Philosophy_Five_Aggregates.md)）：**色 Form = `IRupa` = `IUI`（輸出）＋ `IListener`（輸入）**——監聽器是感官根門，所以 transport/listener 歸**色蘊**，不是受蘊。**受 Sensation = `IVedana`**（感受品質）。**想 Perception = `ISamjna` = `IProvider`**（與 context manager）。**行 Formation = `ISamskara` = `ITool`**。**識 Consciousness = `IVijnana` = `IGuide`**（身份、治理、意志）。
 
@@ -56,7 +56,9 @@
 | `workflow-engine` | 工作流引擎（loop/while 步驟＋落盤狀態） |
 | `devtools` | 開發者工具（inspect、debug） |
 | `agent-ask` | 把認知迴圈暴露為可委派工具（分形組合，帳本 #10） |
-| `agent-spawn` | `agent.spawnChild` 工具——agent 自己的迴圈生成子進程（帳本 #10；僅 daemon 模式） |
+| `agent-spawn` | agent 自己的迴圈生成+管理子代理：`agent.spawnChild`、`agent.supervise`（崩潰重啟）、`agent.fork`／`agent.branch`（session 快照繼承）——Tenet #10／分形社會；僅 daemon 模式 |
+| `agent-comm` | 跨 daemon agent↔agent 訊息（`agent.send`／`agent.inbox`）、request-response（`agent.request`／`agent.reply`）、broadcast（`agent.broadcast`）、pipeline（`agent.pipeline`）、叢集 pub/sub（`agent.subscribe`／`agent.events`）、服務發現（`agent.register`／`agent.findPeer`）——Tenet #10 C/T1–T4 + pipeline；僅 daemon 模式 |
+| `comm-channel-p2p` | 真正的點對點 `ICommChannel`（'messaging'）走 daemon 傳輸——`commChannelRegistry` 的首個活消費者（Doc 53）；僅 daemon 模式 |
 | `confirmation-gate-standard` | 工具呼叫確認閘（approve／deny／ask_user） |
 | `comm-proxy` | 故障隔離裝飾器（熔斷器＋艙壁——驗證層） |
 
