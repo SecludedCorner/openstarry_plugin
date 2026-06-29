@@ -6,7 +6,7 @@
  */
 
 import { readFile, writeFile, readdir, mkdir, rm, stat } from "node:fs/promises";
-import { resolve, normalize, relative } from "node:path";
+import { relative } from "node:path";
 import { z } from "zod";
 import type {
   IPlugin,
@@ -15,30 +15,20 @@ import type {
   ITool,
   ToolContext,
 } from "@openstarry/sdk";
-import { SecurityError } from "@openstarry/sdk";
+import { realpathJail } from "@openstarry/shared";
 
 // ─── Path Validation ───
-
+//
+// Delegates to the shared symlink-aware realpath jail (single source of truth,
+// also used by core's SecurityLayer). This catches a symlink placed INSIDE an
+// allowed path that targets OUTSIDE it — the previous lexical resolve+normalize
+// check did not. Throws SecurityError on escape; returns the realpath'd absolute
+// path for the syscall.
 function validatePath(targetPath: string, ctx: ToolContext): string {
-  const resolved = resolve(ctx.workingDirectory, targetPath);
-  const normalized = normalize(resolved);
-
-  const isAllowed = ctx.allowedPaths.some((allowed) => {
-    const normalizedAllowed = normalize(resolve(allowed));
-    return (
-      normalized === normalizedAllowed ||
-      normalized.startsWith(normalizedAllowed + "/") ||
-      normalized.startsWith(normalizedAllowed + "\\")
-    );
+  return realpathJail(targetPath, {
+    workingDirectory: ctx.workingDirectory,
+    allowedPaths: ctx.allowedPaths,
   });
-
-  if (!isAllowed) {
-    throw new SecurityError(
-      `Path "${targetPath}" is outside allowed scope. Allowed: ${ctx.allowedPaths.join(", ")}`,
-    );
-  }
-
-  return normalized;
 }
 
 // ─── Tools ───

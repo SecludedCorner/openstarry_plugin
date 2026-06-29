@@ -1,5 +1,5 @@
 {
-  "name": "@openstarry-plugin/standard-function-fs",
+  "name": "@openstarry-plugin/standard-function-exec",
   "version": "0.1.0-alpha",
   "type": "module",
   "main": "dist/index.js",
@@ -13,16 +13,18 @@
   "scripts": {
     "build": "tsc -b",
     "clean": "rimraf --glob dist \"*.tsbuildinfo\"",
-    "dev": "tsc -b --watch"
+    "dev": "tsc -b --watch",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@openstarry/sdk": "workspace:*",
-    "@openstarry/shared": "workspace:*",
     "zod": "^3.23.0"
   },
   "devDependencies": {
     "@types/node": "^25.2.0",
     "rimraf": "^5.0.0",
-    "typescript": "^5.5.0"
+    "typescript": "^5.8.2",
+    "vitest": "^4.0.18"
   }
 }

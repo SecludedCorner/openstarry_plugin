@@ -8,7 +8,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { mkdtempSync, rmSync, existsSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, existsSync, writeFileSync, symlinkSync } from "node:fs";
 import type { ITool, ToolContext } from "@openstarry/sdk";
 import { SecurityError } from "@openstarry/sdk";
 import createFsPlugin from "./index.js";
@@ -89,5 +89,57 @@ describe("standard-function-fs", () => {
         ctx,
       ),
     ).rejects.toBeInstanceOf(SecurityError);
+  });
+});
+
+// v0.59.9 PathGuard-live: the lexical resolve+normalize check could NOT catch a
+// symlink placed INSIDE an allowed dir that targets OUTSIDE it. The shared
+// realpath jail follows symlinks on both target and roots, so it does. This drives
+// the REAL plugin tool with allowedPaths exactly as the live loop supplies them.
+describe("standard-function-fs — symlink-escape jail (v0.59.9)", () => {
+  let sandbox: string;
+  let outside: string;
+  let tools: Record<string, ITool<any>>;
+  let ctx: ToolContext;
+
+  beforeEach(async () => {
+    sandbox = mkdtempSync(join(tmpdir(), "fs-jail-"));
+    outside = mkdtempSync(join(tmpdir(), "fs-jail-outside-"));
+    mkdirSync(join(sandbox, "data"));
+    writeFileSync(join(outside, "secret.txt"), "TOP SECRET");
+    // symlink INSIDE the allowed dir pointing OUTSIDE it. 'junction' needs no
+    // admin/Developer-Mode on Windows and targets a directory (cross-platform: on
+    // non-Windows the type arg is ignored and a normal dir symlink is created).
+    symlinkSync(outside, join(sandbox, "data", "escape"), "junction");
+    const hooks = await createFsPlugin().factory({} as never);
+    tools = toolMap(hooks.tools as ITool<unknown>[]);
+    ctx = { workingDirectory: sandbox, allowedPaths: [sandbox] } as ToolContext;
+  });
+
+  afterEach(() => {
+    for (const d of [sandbox, outside]) {
+      try { if (existsSync(d)) rmSync(d, { recursive: true, force: true }); } catch { /* win32 best-effort */ }
+    }
+  });
+
+  it("rejects READ through an in-jail symlink that targets outside", async () => {
+    await expect(
+      tools["fs.read"].execute({ path: "data/escape/secret.txt" }, ctx),
+    ).rejects.toBeInstanceOf(SecurityError);
+  });
+
+  it("rejects WRITE through an in-jail symlink that targets outside", async () => {
+    await expect(
+      tools["fs.write"].execute({ path: "data/escape/pwn.txt", content: "x" }, ctx),
+    ).rejects.toBeInstanceOf(SecurityError);
+    expect(existsSync(join(outside, "pwn.txt"))).toBe(false);
+  });
+
+  it("CONTROL: still allows a new-file write to a real (non-symlink) path in the jail", async () => {
+    await tools["fs.write"].execute({ path: "data/fresh.txt", content: "ok" }, ctx);
+    expect(existsSync(join(sandbox, "data", "fresh.txt"))).toBe(true);
+    await expect(
+      tools["fs.read"].execute({ path: "data/fresh.txt" }, ctx),
+    ).resolves.toBe("ok");
   });
 });
