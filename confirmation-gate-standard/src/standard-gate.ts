@@ -37,6 +37,21 @@ export function createStandardConfirmationGate(
     ?? DEFAULT_CONFIRMATION_GATE_CONFIG.alwaysConfirmTools;
   const neverConfirmTools: readonly string[] = config?.neverConfirmTools
     ?? DEFAULT_CONFIRMATION_GATE_CONFIG.neverConfirmTools;
+  // V-2 fail-closed: with no interactive human, ask_user would hang the loop
+  // until the timeout then default-deny anyway — deny immediately instead.
+  const interactive = config?.interactive
+    ?? (process.stdin.isTTY === true && process.stdout.isTTY === true);
+
+  /** ask_user when a human can answer; immediate deny otherwise (fail-closed). */
+  function askOrDeny(prompt: string): ConfirmationDecision {
+    if (interactive) {
+      return { action: 'ask_user', prompt, timeoutMs: userPromptTimeoutMs };
+    }
+    return {
+      action: 'deny',
+      reasoning: 'non-interactive session — confirmation unavailable (fail-closed)',
+    };
+  }
 
   return {
     skandha: 'samskara',
@@ -47,11 +62,7 @@ export function createStandardConfirmationGate(
 
       // 1. alwaysConfirmTools (highest priority)
       if (alwaysConfirmTools.includes(toolName)) {
-        return {
-          action: 'ask_user',
-          prompt: `Tool "${toolName}" requires confirmation (always-confirm rule).`,
-          timeoutMs: userPromptTimeoutMs,
-        };
+        return askOrDeny(`Tool "${toolName}" requires confirmation (always-confirm rule).`);
       }
 
       // 2. neverConfirmTools
@@ -69,12 +80,10 @@ export function createStandardConfirmationGate(
         return { action: 'approve', reasoning: `Gear ${gear} is bypassed` };
       }
 
-      // 5. Default: ask_user
-      return {
-        action: 'ask_user',
-        prompt: `Confirm execution of "${toolName}"${riskCategory ? ` (risk: ${riskCategory})` : ''}?`,
-        timeoutMs: userPromptTimeoutMs,
-      };
+      // 5. Default: ask_user (or fail-closed deny when non-interactive)
+      return askOrDeny(
+        `Confirm execution of "${toolName}"${riskCategory ? ` (risk: ${riskCategory})` : ''}?`,
+      );
     },
   };
 }

@@ -130,14 +130,20 @@ describe("provider-lmstudio — mapOpenAiChunk", () => {
     ]);
   });
 
-  it('finish_reason "length" → stopReason max_tokens (the only non-end_turn mapping)', () => {
+  it('finish_reason "length" → stopReason max_tokens', () => {
     expect(mapOpenAiChunk({ choices: [{ delta: {}, finish_reason: "length" }] })).toEqual([
       { type: "finish", stopReason: "max_tokens", usage: undefined },
     ]);
   });
 
-  it('any other truthy finish_reason (e.g. "tool_calls") → end_turn (documents actual mapping)', () => {
+  it('finish_reason "tool_calls" → stopReason tool_use (L block — was mis-mapped to end_turn)', () => {
     expect(mapOpenAiChunk({ choices: [{ delta: {}, finish_reason: "tool_calls" }] })).toEqual([
+      { type: "finish", stopReason: "tool_use", usage: undefined },
+    ]);
+  });
+
+  it('other truthy finish_reason (e.g. "content_filter") → end_turn', () => {
+    expect(mapOpenAiChunk({ choices: [{ delta: {}, finish_reason: "content_filter" }] })).toEqual([
       { type: "finish", stopReason: "end_turn", usage: undefined },
     ]);
   });
@@ -206,23 +212,136 @@ describe("provider-lmstudio — convertMessages", () => {
     expect(convertMessages([m])).toEqual([{ role: "assistant", content: "line one\nline two" }]);
   });
 
-  it("filters out non-text segments and drops messages with no text", () => {
+  it("L block: tool_call segments map to an assistant tool_calls message (no longer dropped)", () => {
     const toolOnly: Message = {
       id: "m2",
       role: "assistant",
-      content: [{ type: "tool_call", toolCall: { id: "t1", name: "x", arguments: {} } }],
+      content: [{ type: "tool_call", toolCall: { id: "t1", name: "fs.list", arguments: { path: "." } } }],
       createdAt: 0,
     };
+    expect(convertMessages([toolOnly])).toEqual([
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          { id: "t1", type: "function", function: { name: "fs.list", arguments: '{"path":"."}' } },
+        ],
+      },
+    ]);
+  });
+
+  it("L block: tool_result segments map to role:'tool' messages with tool_call_id; same-message text is kept", () => {
     const mixed: Message = {
       id: "m3",
       role: "user",
       content: [
-        { type: "tool_result", toolResult: { toolCallId: "t1", name: "x", result: "ignored" } },
+        { type: "tool_result", toolResult: { toolCallId: "t1", name: "fs.list", result: "a.txt\nb.txt" } },
         { type: "text", text: "kept" },
       ],
       createdAt: 0,
     };
-    expect(convertMessages([toolOnly, mixed])).toEqual([{ role: "user", content: "kept" }]);
+    expect(convertMessages([mixed])).toEqual([
+      { role: "user", content: "kept" },
+      { role: "tool", content: "a.txt\nb.txt", tool_call_id: "t1" },
+    ]);
+  });
+
+  it("L block: assistant text + tool_call in one message combine into content + tool_calls", () => {
+    const both: Message = {
+      id: "m4",
+      role: "assistant",
+      content: [
+        { type: "text", text: "Let me check." },
+        { type: "tool_call", toolCall: { id: "t2", name: "fs.read", arguments: { path: "x" } } },
+      ],
+      createdAt: 0,
+    };
+    expect(convertMessages([both])).toEqual([
+      {
+        role: "assistant",
+        content: "Let me check.",
+        tool_calls: [
+          { id: "t2", type: "function", function: { name: "fs.read", arguments: '{"path":"x"}' } },
+        ],
+      },
+    ]);
+  });
+});
+
+// ─── L block: streaming tool-call assembly + payload tools ───
+
+describe("provider-lmstudio — createOpenAiStreamMapper (tool-call assembly)", () => {
+  it("assembles the LM-Studio-verified fragment sequence: start → delta(s) → end → finish tool_use", async () => {
+    const { createOpenAiStreamMapper } = await import("./index.js");
+    const m = createOpenAiStreamMapper();
+    // fragment 1: index/id/name + empty arguments (wire-verified 2026-07-02)
+    const e1 = m.mapChunk({
+      choices: [{ delta: { tool_calls: [{ index: 0, id: "631706800", type: "function", function: { name: "fs.list", arguments: "" } }] }, finish_reason: null }],
+    });
+    expect(e1).toEqual([{ type: "tool_call_start", toolCallId: "631706800", name: "fs.list" }]);
+    // fragment 2: index + argument piece only
+    const e2 = m.mapChunk({
+      choices: [{ delta: { tool_calls: [{ index: 0, type: "function", function: { arguments: '{"path"' } }] }, finish_reason: null }],
+    });
+    const e3 = m.mapChunk({
+      choices: [{ delta: { tool_calls: [{ index: 0, type: "function", function: { arguments: ':"."}' } }] }, finish_reason: null }],
+    });
+    expect(e2).toEqual([{ type: "tool_call_delta", toolCallId: "631706800", input: '{"path"' }]);
+    expect(e3).toEqual([{ type: "tool_call_delta", toolCallId: "631706800", input: ':"."}' }]);
+    // finish: end carries the FULL assembled args
+    const e4 = m.mapChunk({ choices: [{ delta: {}, finish_reason: "tool_calls" }] });
+    expect(e4).toEqual([
+      { type: "tool_call_end", toolCallId: "631706800", name: "fs.list", input: '{"path":"."}' },
+      { type: "finish", stopReason: "tool_use", usage: undefined },
+    ]);
+  });
+
+  it("buffers argument pieces that arrive before the name, flushing after start", async () => {
+    const { createOpenAiStreamMapper } = await import("./index.js");
+    const m = createOpenAiStreamMapper(() => "gen-1");
+    const e1 = m.mapChunk({
+      choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '{"a"' } }] }, finish_reason: null }],
+    });
+    expect(e1).toEqual([]); // buffered — no start yet
+    const e2 = m.mapChunk({
+      choices: [{ delta: { tool_calls: [{ index: 0, function: { name: "t", arguments: ":1}" } }] }, finish_reason: null }],
+    });
+    expect(e2).toEqual([
+      { type: "tool_call_start", toolCallId: "gen-1", name: "t" }, // id synthesized
+      { type: "tool_call_delta", toolCallId: "gen-1", input: '{"a"' }, // flushed buffer
+      { type: "tool_call_delta", toolCallId: "gen-1", input: ":1}" },
+    ]);
+  });
+
+  it("maps reasoning_content to reasoning_delta (LM Studio reasoning models)", async () => {
+    const { createOpenAiStreamMapper } = await import("./index.js");
+    const m = createOpenAiStreamMapper();
+    expect(m.mapChunk({ choices: [{ delta: { reasoning_content: "thinking…" }, finish_reason: null }] })).toEqual([
+      { type: "reasoning_delta", text: "thinking…" },
+    ]);
+  });
+});
+
+describe("provider-lmstudio — buildPayload tools (L block)", () => {
+  it("appends OpenAI function declarations + tool_choice auto when tools are present", () => {
+    const payload = buildPayload(
+      makeRequest({
+        tools: [{ name: "fs.list", description: "List files", parameters: { type: "object", properties: {} } }],
+      }),
+    );
+    expect(payload.tools).toEqual([
+      {
+        type: "function",
+        function: { name: "fs.list", description: "List files", parameters: { type: "object", properties: {} } },
+      },
+    ]);
+    expect(payload.tool_choice).toBe("auto");
+  });
+
+  it("tool-less payloads stay byte-identical (no tools/tool_choice keys)", () => {
+    const payload = buildPayload(makeRequest());
+    expect("tools" in payload).toBe(false);
+    expect("tool_choice" in payload).toBe(false);
   });
 });
 

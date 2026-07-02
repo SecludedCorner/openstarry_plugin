@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -44,11 +45,34 @@ async function fetchModels(baseUrl: string): Promise<ModelInfo[]> {
 // ─── Pure helpers (extracted for unit testing; wire behavior identical) ───
 
 /**
+ * One fragment of a streamed tool call (OpenAI `delta.tool_calls[]` entry).
+ * Wire-verified against LM Studio (2026-07-02, qwen3.5-9b): the FIRST fragment
+ * carries `index`, `id`, `type`, `function.name` (+ empty `arguments`);
+ * follow-up fragments carry only `index` + `function.arguments` pieces —
+ * assembly is keyed by `index`.
+ */
+export interface OpenAiToolCallFragment {
+  index?: number;
+  id?: string;
+  type?: string;
+  function?: { name?: string; arguments?: string };
+}
+
+/**
  * Shape of a single OpenAI-compatible streaming chunk (`chat.completion.chunk`)
  * as emitted by LM Studio over SSE. Only the fields this provider reads.
+ * `reasoning_content` is LM Studio's delta field for reasoning models
+ * (qwen3.5 etc.) — mapped to the SDK's `reasoning_delta`.
  */
 export interface OpenAiStreamChunk {
-  choices?: { delta: { content?: string }; finish_reason?: string | null }[];
+  choices?: {
+    delta: {
+      content?: string;
+      reasoning_content?: string;
+      tool_calls?: OpenAiToolCallFragment[];
+    };
+    finish_reason?: string | null;
+  }[];
   usage?: {
     prompt_tokens: number;
     completion_tokens: number;
@@ -89,49 +113,123 @@ export function parseSseLine(line: string): SseLineResult {
 }
 
 /**
- * Map one parsed OpenAI-compatible chunk to OpenStarry ProviderStreamEvents
- * (pure function — extracted for unit testing).
+ * Stateful per-request stream mapper (L block — native tool calling).
  *
- * Mapping preserved exactly from the previous inline logic:
- *   - missing/empty `choices` → no events
- *   - truthy `choices[0].delta.content` → `text_delta` (empty string skipped)
- *   - truthy `choices[0].finish_reason` → `finish`; stopReason is
- *     `"max_tokens"` for `finish_reason === "length"`, `"end_turn"` for every
- *     other truthy value (`"stop"`, `"tool_calls"`, ...); `null` → no finish
- *   - `chunk.usage` (when present on the finish chunk) → TokenUsage
+ * OpenAI streams a tool call as FRAGMENTS across chunks (first fragment:
+ * index/id/name; later fragments: index + argument pieces), so assembly needs
+ * per-stream state — one mapper instance per chat() request.
  *
- * Faithful-extraction note: like the original inline code, this accesses
- * `choices[0].delta.content` without guarding `delta` itself — a chunk whose
- * first choice lacks `delta` throws TypeError, which the consuming generator's
- * try/catch converts into an `error` event (pre-existing behavior preserved).
+ * Event mapping:
+ *   - `delta.reasoning_content` → `reasoning_delta` (LM Studio reasoning models)
+ *   - `delta.content` → `text_delta` (empty string skipped, as before)
+ *   - `delta.tool_calls` fragments → `tool_call_start` once id+name are known,
+ *     then `tool_call_delta` PER argument fragment (load-bearing: the agent
+ *     loop fills its input buffer from deltas, NOT from end.input — the
+ *     provider-claude-cli lesson), argument pieces that arrive before the
+ *     name are buffered and flushed right after start.
+ *   - `finish_reason "tool_calls"` → `tool_call_end` per assembled call, then
+ *     `finish {stopReason: "tool_use"}` (previously mis-mapped to end_turn).
+ *   - `finish_reason "length"` → max_tokens; other truthy values → end_turn.
+ *   - `chunk.usage` on the finish chunk → TokenUsage.
+ *
+ * Faithful-extraction note preserved: `choices[0].delta` is accessed without
+ * guarding `delta` itself — a chunk whose first choice lacks `delta` throws
+ * TypeError, which chat()'s try/catch converts into an `error` event.
+ */
+export function createOpenAiStreamMapper(genId: () => string = () => randomUUID()): {
+  mapChunk(chunk: OpenAiStreamChunk): ProviderStreamEvent[];
+} {
+  interface CallAccumulator {
+    id: string | null;
+    name: string;
+    args: string;
+    started: boolean;
+    pendingArgs: string[];
+  }
+  const calls = new Map<number, CallAccumulator>();
+
+  return {
+    mapChunk(chunk: OpenAiStreamChunk): ProviderStreamEvent[] {
+      const events: ProviderStreamEvent[] = [];
+
+      const choices = chunk.choices;
+      if (!choices || choices.length === 0) return events;
+
+      const delta = choices[0].delta;
+      if (delta.reasoning_content) {
+        events.push({ type: "reasoning_delta", text: delta.reasoning_content });
+      }
+      if (delta.content) {
+        events.push({ type: "text_delta", text: delta.content });
+      }
+
+      for (const frag of delta.tool_calls ?? []) {
+        const index = frag.index ?? 0;
+        let acc = calls.get(index);
+        if (!acc) {
+          acc = { id: null, name: "", args: "", started: false, pendingArgs: [] };
+          calls.set(index, acc);
+        }
+        if (frag.id) acc.id = frag.id;
+        if (frag.function?.name) acc.name += frag.function.name;
+
+        if (!acc.started && acc.name) {
+          acc.id = acc.id ?? genId();
+          acc.started = true;
+          events.push({ type: "tool_call_start", toolCallId: acc.id, name: acc.name });
+          for (const piece of acc.pendingArgs) {
+            acc.args += piece;
+            events.push({ type: "tool_call_delta", toolCallId: acc.id, input: piece });
+          }
+          acc.pendingArgs = [];
+        }
+
+        if (frag.function?.arguments) {
+          if (acc.started && acc.id) {
+            acc.args += frag.function.arguments;
+            events.push({ type: "tool_call_delta", toolCallId: acc.id, input: frag.function.arguments });
+          } else {
+            acc.pendingArgs.push(frag.function.arguments);
+          }
+        }
+      }
+
+      const finishReason = choices[0].finish_reason;
+      if (finishReason) {
+        if (finishReason === "tool_calls") {
+          for (const [, acc] of [...calls.entries()].sort((a, b) => a[0] - b[0])) {
+            // a call that never received a name cannot be executed — skip honestly
+            if (!acc.started || !acc.id) continue;
+            events.push({ type: "tool_call_end", toolCallId: acc.id, name: acc.name, input: acc.args });
+          }
+        }
+        const usage = chunk.usage;
+        events.push({
+          type: "finish",
+          stopReason:
+            finishReason === "length" ? "max_tokens" : finishReason === "tool_calls" ? "tool_use" : "end_turn",
+          usage: usage
+            ? {
+                promptTokens: usage.prompt_tokens,
+                completionTokens: usage.completion_tokens,
+                totalTokens: usage.total_tokens,
+              }
+            : undefined,
+        });
+      }
+
+      return events;
+    },
+  };
+}
+
+/**
+ * Back-compat single-chunk mapper (a fresh assembler per call — identical to
+ * the old pure function for text/finish/usage chunks; kept for existing tests
+ * and external callers). chat() uses a per-request createOpenAiStreamMapper.
  */
 export function mapOpenAiChunk(chunk: OpenAiStreamChunk): ProviderStreamEvent[] {
-  const events: ProviderStreamEvent[] = [];
-
-  const choices = chunk.choices;
-  if (!choices || choices.length === 0) return events;
-
-  const delta = choices[0].delta;
-  if (delta.content) {
-    events.push({ type: "text_delta", text: delta.content });
-  }
-
-  if (choices[0].finish_reason) {
-    const usage = chunk.usage;
-    events.push({
-      type: "finish",
-      stopReason: choices[0].finish_reason === "length" ? "max_tokens" : "end_turn",
-      usage: usage
-        ? {
-            promptTokens: usage.prompt_tokens,
-            completionTokens: usage.completion_tokens,
-            totalTokens: usage.total_tokens,
-          }
-        : undefined,
-    });
-  }
-
-  return events;
+  return createOpenAiStreamMapper().mapChunk(chunk);
 }
 
 /**
@@ -139,8 +237,11 @@ export function mapOpenAiChunk(chunk: OpenAiStreamChunk): ProviderStreamEvent[] 
  * (pure function — extracted for unit testing).
  *
  * Key order (model, messages, stream, max_tokens?, temperature?) matches the
- * previous inline construction so `JSON.stringify` emits identical bytes.
- * `maxTokens`/`temperature` use `!== undefined` checks (0 is forwarded).
+ * previous inline construction so `JSON.stringify` emits identical bytes for
+ * tool-less requests. `maxTokens`/`temperature` use `!== undefined` checks
+ * (0 is forwarded). When the agent supplies tools (L block), they are appended
+ * as native OpenAI function declarations with `tool_choice: "auto"` — LM
+ * Studio supports OpenAI function-calling for tool-capable models.
  */
 export function buildPayload(request: ChatRequest): Record<string, unknown> {
   const payload: Record<string, unknown> = {
@@ -154,6 +255,13 @@ export function buildPayload(request: ChatRequest): Record<string, unknown> {
   }
   if (request.temperature !== undefined) {
     payload.temperature = request.temperature;
+  }
+  if (request.tools && request.tools.length > 0) {
+    payload.tools = request.tools.map((t) => ({
+      type: "function",
+      function: { name: t.name, description: t.description, parameters: t.parameters },
+    }));
+    payload.tool_choice = "auto";
   }
 
   return payload;
@@ -223,6 +331,8 @@ export class LmStudioProvider implements IProvider {
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
+    // Per-request mapper: tool-call fragments assemble across chunks (L block).
+    const mapper = createOpenAiStreamMapper();
 
     try {
       while (true) {
@@ -240,7 +350,7 @@ export class LmStudioProvider implements IProvider {
           // finish_reason, never from [DONE].
           if (parsed.kind !== "chunk") continue;
 
-          for (const event of mapOpenAiChunk(parsed.chunk)) {
+          for (const event of mapper.mapChunk(parsed.chunk)) {
             yield event;
             if (event.type === "finish") return;
           }
@@ -257,19 +367,34 @@ export class LmStudioProvider implements IProvider {
   }
 }
 
+/** OpenAI-compatible chat message (widened for tool traffic, L block). */
+export interface OpenAiChatMessage {
+  role: string;
+  content: string | null;
+  tool_calls?: { id: string; type: "function"; function: { name: string; arguments: string } }[];
+  tool_call_id?: string;
+}
+
 /**
- * Simple message converter (OpenAI-compatible format).
+ * Message converter (OpenAI-compatible format).
  *
- * Pure function — exported for unit testing. Behavior unchanged: optional
- * systemPrompt becomes a leading `system` message; per message, only `text`
- * segments are kept and joined with `\n`; messages whose joined text is
- * empty are dropped entirely.
+ * Pure function — exported for unit testing. Text handling unchanged:
+ * optional systemPrompt becomes a leading `system` message; text segments are
+ * joined with `\n`; a message with neither text nor tool segments is dropped.
+ *
+ * L block: tool segments are no longer discarded (they were — which broke the
+ * multi-turn tool loop, findings.md 2026-07-01):
+ *   - `tool_call` segments → an assistant message carrying OpenAI
+ *     `tool_calls` (arguments JSON-stringified), with any same-message text as
+ *     `content` (null when absent, per the OpenAI schema).
+ *   - `tool_result` segments → one `role:"tool"` message each, carrying
+ *     `tool_call_id` — the result feedback the model reads on the next round.
  */
 export function convertMessages(
   messages: ChatRequest["messages"],
   systemPrompt?: string
-): { role: string; content: string }[] {
-  const result: { role: string; content: string }[] = [];
+): OpenAiChatMessage[] {
+  const result: OpenAiChatMessage[] = [];
 
   if (systemPrompt) {
     result.push({ role: "system", content: systemPrompt });
@@ -280,8 +405,29 @@ export function convertMessages(
       .filter((seg) => seg.type === "text")
       .map((seg) => (seg as { type: "text"; text: string }).text)
       .join("\n");
-    if (text) {
+    const toolCalls = msg.content.filter((seg) => seg.type === "tool_call");
+    const toolResults = msg.content.filter((seg) => seg.type === "tool_result");
+
+    if (toolCalls.length > 0) {
+      result.push({
+        role: msg.role,
+        content: text || null,
+        tool_calls: toolCalls.map((seg) => {
+          const tc = (seg as { type: "tool_call"; toolCall: { id: string; name: string; arguments: Record<string, unknown> } }).toolCall;
+          return {
+            id: tc.id,
+            type: "function" as const,
+            function: { name: tc.name, arguments: JSON.stringify(tc.arguments) },
+          };
+        }),
+      });
+    } else if (text) {
       result.push({ role: msg.role, content: text });
+    }
+
+    for (const seg of toolResults) {
+      const tr = (seg as { type: "tool_result"; toolResult: { toolCallId: string; result: string } }).toolResult;
+      result.push({ role: "tool", content: tr.result, tool_call_id: tr.toolCallId });
     }
   }
 

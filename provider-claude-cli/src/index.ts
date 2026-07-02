@@ -89,6 +89,7 @@
  */
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, isAbsolute, join } from "node:path";
@@ -102,6 +103,7 @@ import type {
   ModelInfo,
   PluginHooks,
   ProviderStreamEvent,
+  ToolJsonSchema,
 } from "@openstarry/sdk";
 
 // ─── Models (per Claude CLI --model flag) ───
@@ -143,15 +145,35 @@ interface ClaudeCliConfig {
  * to pass app-supplied messages only. See README.md "Prompt Channel +
  * Role-Prefix Injection" section.
  */
+/** Render one content segment to text. tool_call / tool_result segments are
+ *  surfaced as readable lines so a text-only model can follow a multi-round tool
+ *  loop (it sees what it asked for and what came back). */
+function renderSegment(seg: unknown): string {
+  if (typeof seg === "string") return seg;
+  const s = seg as Record<string, unknown>;
+  if (s.type === "tool_result") {
+    const r = s.toolResult as { name?: string; result?: string; isError?: boolean } | undefined;
+    if (r) return `[tool ${r.name ?? "?"} result${r.isError ? " (error)" : ""}: ${r.result ?? ""}]`;
+  }
+  if (s.type === "tool_call") {
+    const c = s.toolCall as { name?: string; arguments?: unknown } | undefined;
+    if (c) return `[called tool ${c.name ?? "?"} with arguments ${JSON.stringify(c.arguments ?? {})}]`;
+  }
+  return (s.text as string) ?? "";
+}
+
 export function collapseToPrompt(messages: readonly Message[], systemPrompt?: string): string {
   const lines: string[] = [];
   if (systemPrompt) lines.push(`System: ${systemPrompt}`);
   for (const m of messages) {
-    const role = m.role === "user" ? "User" : m.role === "assistant" ? "Assistant" : "System";
+    const role = m.role === "user" ? "User"
+      : m.role === "assistant" ? "Assistant"
+      : m.role === "tool" ? "Tool"
+      : "System";
     const content = typeof m.content === "string"
       ? m.content
       : Array.isArray(m.content)
-        ? m.content.map((seg) => (typeof seg === "string" ? seg : (seg as { text?: string }).text ?? "")).join("")
+        ? m.content.map(renderSegment).join("")
         : "";
     lines.push(`${role}: ${content}`);
   }
@@ -159,8 +181,12 @@ export function collapseToPrompt(messages: readonly Message[], systemPrompt?: st
   return lines.join("\n\n");
 }
 
-// ─── Disallowed tools list (5-point isolation guarantee #3) ───
-
+// ─── Built-in tools we ensure are unavailable (5-point isolation guarantee #3) ───
+// NOTE (v0.59.x): this list is NO LONGER passed via --disallowedTools — that arg was
+// comma-glued into a single non-matching value AND leaked into the variadic --tools flag.
+// The authoritative full-disable is now an EMPTY `--tools` set in buildArgv (CLI reports
+// "tools":[]), which covers ALL of Claude Code's ~37 tools, not just these 9. Retained as
+// documentation of the originally-audited set and for the CLI major-version pin below.
 const DISALLOWED_TOOLS = [
   "Bash",
   "Read",
@@ -345,6 +371,81 @@ function _resolveClaudeBinaryImpl(cliPath: string): string | null {
 const ISOLATION_SYSTEM_PROMPT =
   "You are an inference engine. Do not invoke tools. Reply concisely.";
 
+// ─── Prompted tool-calling (make this text-only subprocess tool-capable) ───
+// The claude CLI is run as a pure text generator (its OWN built-in tools stay
+// disabled via --disallowedTools). To let it drive OpenStarry's tools, we describe
+// them in the prompt and ask the model to emit a JSON tool-call as TEXT; we parse
+// that and emit the same tool_call stream events the agent loop already consumes.
+// OpenStarry executes its own (controlled) tools — never the claude CLI's.
+const TOOL_MODE_SYSTEM_PROMPT =
+  "You are the reasoning core of an agent framework. You have NO built-in tools; the " +
+  "only tools you may use are the ones described in the user message, invoked by emitting " +
+  "the specified JSON. Never claim a described tool is unavailable. Reply with either a " +
+  "single tool-call JSON object or a final plain-text answer.";
+
+/** Build the in-prompt tool catalogue + the JSON call protocol (pure). */
+export function buildToolInstructions(tools: readonly ToolJsonSchema[]): string {
+  const lines = [
+    "# Tools",
+    "You can call the tools below. To call ONE tool, reply with ONLY this JSON object and nothing else:",
+    '{"tool_call": {"name": "<tool-name>", "arguments": { <args> }}}',
+    "Call at most one tool per reply. When you have the final answer and need no tool, reply in plain text (no JSON).",
+    "",
+    "Available tools:",
+  ];
+  for (const t of tools) {
+    lines.push(`- ${t.name}: ${t.description}`);
+    lines.push(`  arguments schema: ${JSON.stringify(t.parameters)}`);
+  }
+  return lines.join("\n");
+}
+
+/** Extract every top-level balanced {...} JSON object from text (string-aware). */
+function extractJsonObjects(text: string): unknown[] {
+  const out: unknown[] = [];
+  let depth = 0, start = -1, inStr = false, esc = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === "\\") esc = true;
+      else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') { inStr = true; continue; }
+    if (c === "{") { if (depth === 0) start = i; depth++; }
+    else if (c === "}") {
+      if (depth > 0) {
+        depth--;
+        if (depth === 0 && start >= 0) {
+          try { out.push(JSON.parse(text.slice(start, i + 1))); } catch { /* not valid JSON; skip */ }
+          start = -1;
+        }
+      }
+    }
+  }
+  return out;
+}
+
+/** Parse a {"tool_call":{name,arguments}} directive from model output (pure).
+ *  Tolerates code fences and surrounding prose. Returns null if none. */
+export function parseToolCall(text: string): { name: string; arguments: Record<string, unknown> } | null {
+  if (!text) return null;
+  for (const obj of extractJsonObjects(text)) {
+    if (!obj || typeof obj !== "object") continue;
+    const tc = (obj as Record<string, unknown>).tool_call ?? (obj as Record<string, unknown>).toolCall;
+    if (tc && typeof tc === "object" && typeof (tc as Record<string, unknown>).name === "string") {
+      const name = (tc as Record<string, unknown>).name as string;
+      const rawArgs = (tc as Record<string, unknown>).arguments;
+      const args = rawArgs && typeof rawArgs === "object" && !Array.isArray(rawArgs)
+        ? (rawArgs as Record<string, unknown>)
+        : {};
+      return { name, arguments: args };
+    }
+  }
+  return null;
+}
+
 /**
  * Cycle 03-27 hygiene fix F-CY25-§4-R1-04 (LOW): explicit subprocess cwd =
  * OS tmpdir, codified as an exported getter so unit tests can pin the
@@ -438,17 +539,29 @@ export function buildArgv(args: {
   readonly maxTurns: number;
   readonly effort?: ClaudeCliConfig["effort"];
   readonly mcpEmptyConfigPath: string;
+  readonly systemPrompt?: string;
 }): string[] {
   const argv = [
     "-p", args.prompt,
     "--output-format", "stream-json",
     "--verbose",
     "--include-partial-messages",
-    // HOTFIX v4 guarantee #2 replacement (OAuth-compatible isolation triple):
-    "--system-prompt", ISOLATION_SYSTEM_PROMPT,           // override CLAUDE.md context
+    // HOTFIX v4 guarantee #2 replacement (OAuth-compatible isolation triple).
+    // systemPrompt still overrides CLAUDE.md context; tool-mode passes a variant
+    // that enables prompted tool-calling (built-in tools stay --disallowedTools).
+    "--system-prompt", args.systemPrompt ?? ISOLATION_SYSTEM_PROMPT,
     "--strict-mcp-config", "--mcp-config", args.mcpEmptyConfigPath, // skip MCP discovery
     "--disable-slash-commands",                            // skip skills
-    "--disallowedTools", DISALLOWED_TOOLS,                 // guarantee #3: disable built-in tools
+    // guarantee #3: disable Claude Code's OWN built-in tools so the subprocess is pure
+    // text inference. `--tools` with an EMPTY set is the authoritative, version-drift-
+    // proof full-disable — the CLI then reports "tools":[] (verified on 2.1.185). This is
+    // ALSO what makes prompted tool-calling work: with zero built-in tools the model
+    // cannot go agentic and instead emits our tool-call JSON as plain text in a single
+    // turn. CRITICAL: `--tools` is variadic, so it MUST be immediately followed by another
+    // flag (here --max-turns). Do NOT add `--disallowedTools` after it — the prior
+    // (comma-glued, non-matching) DISALLOWED_TOOLS value leaked into --tools, re-enabling
+    // those tools AND causing an internal agentic turn → error_max_turns.
+    "--tools",                                             // (empty set) → "tools":[]: no built-in tools
     "--max-turns", String(args.maxTurns),                  // pure inference; no agentic loop
     "--no-session-persistence",                            // guarantee #4: no disk session log
     "--model", args.model,
@@ -610,6 +723,7 @@ async function* streamClaudeCli(args: {
   timeout: number;
   cliPath: string;
   logger: ReturnType<typeof createLogger>;
+  systemPrompt?: string;
 }): AsyncGenerator<ProviderStreamEvent> {
   const argv = buildArgv({
     prompt: args.prompt,
@@ -617,6 +731,7 @@ async function* streamClaudeCli(args: {
     maxTurns: args.maxTurns,
     effort: args.effort,
     mcpEmptyConfigPath: ensureEmptyMcpConfigPath(),
+    systemPrompt: args.systemPrompt,
   });
 
   let proc: ChildProcessWithoutNullStreams;
@@ -746,6 +861,46 @@ async function* streamClaudeCli(args: {
   }
 }
 
+// ─── Prompted tool-calling orchestration (extracted for unit-testability) ───
+
+/**
+ * Buffer a text-only subprocess stream, parse a tool-call JSON out of the
+ * reply, and re-emit the SAME native tool_call_* event sequence a real provider
+ * would — so OpenStarry's loop executes ITS OWN tools on a text-only Claude CLI.
+ *
+ * The `tool_call_delta` is load-bearing: the agent loop reads its input buffer
+ * (filled by deltas), NOT `end.input`, so dropping the delta silently loses
+ * every argument. This function is extracted so the
+ * start → delta → end → finish sequence is regression-tested without a live CLI
+ * (see __tests__/prompted-tool-calling.test.ts). Behaviour is byte-identical to
+ * the previous inline implementation in `chat()`.
+ */
+export async function* emitPromptedToolCall(
+  source: AsyncIterable<ProviderStreamEvent>,
+): AsyncGenerator<ProviderStreamEvent> {
+  let buffered = "";
+  for await (const ev of source) {
+    if (ev.type === "text_delta") buffered += ev.text;
+    else if (ev.type === "error") {
+      yield ev;
+      return;
+    }
+    // swallow the subprocess's own "finish"; we emit our own below
+  }
+  const call = parseToolCall(buffered);
+  if (call) {
+    const id = randomUUID();
+    const input = JSON.stringify(call.arguments);
+    yield { type: "tool_call_start", toolCallId: id, name: call.name };
+    yield { type: "tool_call_delta", toolCallId: id, input };
+    yield { type: "tool_call_end", toolCallId: id, name: call.name, input };
+    yield { type: "finish", stopReason: "tool_use" };
+  } else {
+    if (buffered.length > 0) yield { type: "text_delta", text: buffered };
+    yield { type: "finish", stopReason: "end_turn" };
+  }
+}
+
 // ─── Provider adapter ───
 
 function createClaudeCliAdapter(cfg: ClaudeCliConfig): IProvider {
@@ -786,16 +941,31 @@ function createClaudeCliAdapter(cfg: ClaudeCliConfig): IProvider {
     },
 
     async *chat(request: ChatRequest): AsyncGenerator<ProviderStreamEvent> {
-      const prompt = collapseToPrompt(request.messages, request.systemPrompt);
       const model = request.model || defaultModel;
+      const tools = request.tools ?? [];
+
+      // ── Prompted tool-calling: make the text-only subprocess tool-capable ──
+      // When the agent loop offers tools, describe them in the prompt, run a single
+      // text inference, then parse the model's reply for a tool-call JSON. We emit
+      // the same tool_call_* events as a native provider, so OpenStarry's loop
+      // executes ITS OWN tools (the claude CLI's built-in tools remain disabled).
+      if (tools.length > 0) {
+        const convo = collapseToPrompt(request.messages, request.systemPrompt);
+        const prompt = `${buildToolInstructions(tools)}\n\n${convo}`;
+        yield* emitPromptedToolCall(
+          streamClaudeCli({
+            prompt, model, maxTurns, effort: cfg.effort, timeout, cliPath, logger,
+            systemPrompt: TOOL_MODE_SYSTEM_PROMPT,
+          }),
+        );
+        return;
+      }
+
+      // ── Plain text inference (no tools offered) ──
+      const prompt = collapseToPrompt(request.messages, request.systemPrompt);
       yield* streamClaudeCli({
-        prompt,
-        model,
-        maxTurns,
-        effort: cfg.effort,
-        timeout,
-        cliPath,
-        logger,
+        prompt, model, maxTurns, effort: cfg.effort, timeout, cliPath, logger,
+        systemPrompt: ISOLATION_SYSTEM_PROMPT,
       });
     },
   };
@@ -808,7 +978,7 @@ export function createClaudeCliPlugin(): IPlugin {
     manifest: {
       name: "@openstarry-plugin/provider-claude-cli",
       version: "0.1.0-alpha",
-      description: "Claude CLI subprocess provider (text-only inference; no function-calling)",
+      description: "Claude CLI subprocess provider (text inference + prompted tool-calling for OpenStarry tools)",
       skandha: "samjna" as const,
     },
 

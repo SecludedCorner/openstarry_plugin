@@ -1,4 +1,4 @@
-export { createKeywordRetrievalContextManager } from "./context.js";
+export { createKeywordRetrievalContextManager, terms } from "./context.js";
 export type { KeywordRetrievalOptions } from "./context.js";
 
 import type { IPlugin, IPluginContext, PluginHooks } from "@openstarry/sdk";

@@ -19,8 +19,11 @@ import type { ProviderStreamEvent } from '@openstarry/sdk';
 import {
   __resetEmptyMcpConfigPathForTests,
   buildArgv,
+  buildToolInstructions,
+  collapseToPrompt,
   ensureEmptyMcpConfigPath,
   mapStreamEvent,
+  parseToolCall,
 } from '../src/index.js';
 
 const MCP = '/tmp/openstarry-test-mcp.json';
@@ -54,14 +57,21 @@ describe('provider-claude-cli — buildArgv (5-point isolation guarantees, HOTFI
     expect(argv).toContain('--disable-slash-commands');
   });
 
-  it('emits --disallowedTools with all 9 built-in tools (guarantee #3)', () => {
+  it('emits an EMPTY --tools set to fully disable built-in tools (guarantee #3, version-drift-proof)', () => {
     const argv = buildArgv(baseArgs);
-    const idx = argv.indexOf('--disallowedTools');
+    const idx = argv.indexOf('--tools');
     expect(idx).toBeGreaterThanOrEqual(0);
-    const value = argv[idx + 1];
-    for (const tool of ['Bash', 'Read', 'Edit', 'Write', 'WebSearch', 'WebFetch', 'Grep', 'Glob', 'NotebookEdit']) {
-      expect(value).toContain(tool);
-    }
+    // Empty variadic: the token right after --tools must be another flag (no tool
+    // values), so the CLI reports "tools":[] — covering ALL ~37 built-in tools, not a
+    // stale 9-name list. (The old --disallowedTools both no-op'd and corrupted --tools.)
+    expect(argv[idx + 1].startsWith('--')).toBe(true);
+    expect(argv).not.toContain('--disallowedTools');
+  });
+
+  it('uses a tool-mode system prompt when one is provided (prompted tool-calling)', () => {
+    const argv = buildArgv({ ...baseArgs, systemPrompt: 'TOOLMODE-XYZ' });
+    const idx = argv.indexOf('--system-prompt');
+    expect(argv[idx + 1]).toBe('TOOLMODE-XYZ');
   });
 
   it('emits --no-session-persistence (guarantee #4: no disk session log)', () => {
@@ -264,5 +274,49 @@ describe('provider-claude-cli — mapStreamEvent fixture replay (real CLI ndjson
     if (events[1].type === 'error') {
       expect(events[1].error.message).toContain('error_max_turns');
     }
+  });
+});
+
+describe('provider-claude-cli — prompted tool-calling', () => {
+  const TOOLS = [
+    { name: 'code.search', description: 'grep files', parameters: { type: 'object', properties: { query: { type: 'string' } } } },
+  ];
+
+  it('buildToolInstructions lists each tool + the JSON call protocol', () => {
+    const txt = buildToolInstructions(TOOLS);
+    expect(txt).toContain('code.search');
+    expect(txt).toContain('grep files');
+    expect(txt).toContain('"tool_call"');
+    expect(txt).toContain('"query"'); // schema embedded
+  });
+
+  it('parseToolCall extracts a clean tool-call JSON object', () => {
+    const r = parseToolCall('{"tool_call":{"name":"code.search","arguments":{"query":"Skandha"}}}');
+    expect(r).toEqual({ name: 'code.search', arguments: { query: 'Skandha' } });
+  });
+
+  it('parseToolCall tolerates surrounding prose / code fences', () => {
+    const r = parseToolCall('Sure, let me search.\n```json\n{"tool_call": {"name": "fs.list", "arguments": {}}}\n```\n');
+    expect(r).toEqual({ name: 'fs.list', arguments: {} });
+  });
+
+  it('parseToolCall returns null for a plain-text answer (no tool call)', () => {
+    expect(parseToolCall('The file is at packages/sdk/src/types/aggregates.ts.')).toBeNull();
+    expect(parseToolCall('{"not_a_tool_call": 1}')).toBeNull();
+  });
+
+  it('parseToolCall is not fooled by a brace inside a string value', () => {
+    const r = parseToolCall('{"tool_call":{"name":"exec.run","arguments":{"command":"echo","args":["a}b"]}}}');
+    expect(r?.name).toBe('exec.run');
+    expect((r?.arguments.args as string[])[0]).toBe('a}b');
+  });
+
+  it('collapseToPrompt renders tool_call + tool_result segments for multi-round context', () => {
+    const prompt = collapseToPrompt([
+      { id: '1', role: 'assistant', content: [{ type: 'tool_call', toolCall: { id: 't1', name: 'code.search', arguments: { query: 'x' } } }], createdAt: 0 },
+      { id: '2', role: 'tool', content: [{ type: 'tool_result', toolResult: { toolCallId: 't1', name: 'code.search', result: 'a.ts:1: x' } }], createdAt: 0 },
+    ]);
+    expect(prompt).toContain('called tool code.search');
+    expect(prompt).toContain('tool code.search result: a.ts:1: x');
   });
 });

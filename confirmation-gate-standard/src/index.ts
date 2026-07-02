@@ -15,11 +15,24 @@
  * @criticality optional-no-effect
  */
 
-import type { IPlugin, IPluginContext, PluginHooks } from "@openstarry/sdk";
+import type { AgentEvent, IPlugin, IPluginContext, PluginHooks } from "@openstarry/sdk";
+import { AgentEventType } from "@openstarry/sdk";
 import { createStandardConfirmationGate } from "./standard-gate.js";
 import type { StandardGateConfig } from "./types.js";
 
-export function createConfirmationGateStandardPlugin(): IPlugin {
+/**
+ * The loop's confirmation-flow TOOL_BLOCKED reasons (loop.ts gate phase):
+ * "User denied: …" / "Confirmation timeout (default-deny)" /
+ * "Confirmation gate denied: …" / "Confirmation gate error: …".
+ * Volition vetoes ("volition veto (…)") deliberately do NOT match.
+ */
+function isConfirmationDenial(reason: string): boolean {
+  return reason.startsWith("User denied") || reason.includes("Confirmation");
+}
+
+export function createConfirmationGateStandardPlugin(
+  factoryConfig: StandardGateConfig = {},
+): IPlugin {
   return {
     manifest: {
       name: '@openstarry-plugin/confirmation-gate-standard',
@@ -31,11 +44,45 @@ export function createConfirmationGateStandardPlugin(): IPlugin {
     },
 
     async factory(ctx: IPluginContext): Promise<PluginHooks> {
-      const config = ctx.config as Partial<StandardGateConfig> ?? {};
+      // agent.json plugin config wins over factory config (standard pattern).
+      const config: Partial<StandardGateConfig> = {
+        ...factoryConfig,
+        ...((ctx.config as Partial<StandardGateConfig>) ?? {}),
+      };
       const gate = createStandardConfirmationGate(config);
+
+      // V-2 model feedback: a denied call gets no tool_result (core loop shape),
+      // so the model would silently lose the action. Bridge the denial back
+      // through the EXISTING pushInput seam — the next turn tells the model the
+      // user declined, so it can adapt instead of retrying blindly. Deduped per
+      // tool within a short window (one plan can deny several calls at once).
+      let unsub: (() => void) | null = null;
+      if (config.notifyModelOnDeny !== false) {
+        const recentlyNotified = new Map<string, number>();
+        unsub = ctx.bus.on(AgentEventType.TOOL_BLOCKED, (event: AgentEvent) => {
+          const payload = event.payload as { name?: string; reason?: string } | undefined;
+          const reason = payload?.reason ?? "";
+          if (!isConfirmationDenial(reason)) return;
+          const name = payload?.name ?? "tool";
+          const now = Date.now();
+          const last = recentlyNotified.get(name) ?? 0;
+          if (now - last < 3000) return;
+          recentlyNotified.set(name, now);
+          ctx.pushInput({
+            source: "confirmation-gate",
+            inputType: "user_input",
+            data:
+              `[system notice] The proposed "${name}" call was DECLINED (${reason}). ` +
+              `Do not retry it; acknowledge and adjust your approach.`,
+          });
+        });
+      }
 
       return {
         confirmationGate: gate,
+        dispose: () => {
+          unsub?.();
+        },
       };
     },
   };

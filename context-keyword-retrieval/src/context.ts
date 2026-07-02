@@ -46,8 +46,14 @@ function messageText(m: Message): string {
   return m.content.map(segmentText).join(" ").toLowerCase();
 }
 
-/** Tokenize into a distinct term set (keeps CJK, drops short tokens + stopwords). */
-function terms(text: string): Set<string> {
+/**
+ * Tokenize into a distinct term set (keeps CJK, drops short tokens + stopwords).
+ *
+ * Exported (additive, C#2 Step D) as the single-truth-source keyword tokenizer:
+ * memory-context's gated seed retrieval reuses it (MR-12 — no parallel
+ * tokenizer). Behavior unchanged.
+ */
+export function terms(text: string): Set<string> {
   const out = new Set<string>();
   for (const tok of text.toLowerCase().split(/[^a-z0-9一-鿿]+/)) {
     if (tok.length >= 2 && !STOPWORDS.has(tok)) out.add(tok);

@@ -1,0 +1,33 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "OpenStarry Plugin Ecosystem"
+type: software
+authors:
+  - family-names: "Yang"
+    given-names: "Yulin"
+    alias: "楊佑麟"
+    affiliation: "SecludedCorner"
+    orcid: "https://orcid.org/0009-0007-4827-8449"
+license: Apache-2.0
+version: v0.60.0-alpha
+date-released: 2026-07-03
+repository-code: "https://github.com/SecludedCorner/openstarry_plugin"
+url: "https://github.com/SecludedCorner/openstarry_plugin"
+keywords:
+  - AI agents
+  - agent operating system
+  - plugin architecture
+  - Five Aggregates
+references:
+  # CFF 1.2 reference items require authors, and the reference-type enum has
+  # no "dataset" — the Zenodo deposit is publication_type "report".
+  - type: report
+    title: "OpenStarry: An Agent OS Reference Architecture — Documentation Corpus, Tenets Fulfillment Ledger, and Letter to the Future"
+    authors:
+      - family-names: "Yang"
+        given-names: "Yulin"
+        alias: "楊佑麟"
+        affiliation: "SecludedCorner"
+        orcid: "https://orcid.org/0009-0007-4827-8449"
+    doi: 10.5281/zenodo.20698129
+    notes: "Companion documentation corpus (canonical tenets, fulfillment ledger, letter to the future)."

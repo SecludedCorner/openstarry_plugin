@@ -40,7 +40,21 @@ export interface HeuristicRule {
   readonly windowSize: number;
 }
 
+/**
+ * How hard-rule hits are handled (V-2):
+ * - 'block'   — veto + TOOL_BLOCKED (V-1 behavior; safe default).
+ * - 'confirm' — do NOT veto; pass the call through so the confirmation gate
+ *   (which the loop runs AFTER volition) can ask the user. REQUIRES a
+ *   confirmationGate plugin (e.g. confirmation-gate-standard) in the same
+ *   config — without one the call executes unconfirmed (fail-open), so
+ *   'confirm' is never the default.
+ * - 'allow'   — hard rules disabled entirely.
+ * Soft rules and the heuristic anti-loop stay active in every mode.
+ */
+export type VolitionMode = 'block' | 'confirm' | 'allow';
+
 export interface VolitionRuleEngineConfig {
+  readonly mode?: VolitionMode;
   readonly hardRules?: readonly HardRule[];
   readonly softRules?: readonly SoftRule[];
   readonly heuristicRules?: readonly HeuristicRule[];
@@ -54,6 +68,24 @@ export const DEFAULT_VOLITION_RULE_ENGINE_CONFIG: VolitionRuleEngineConfig = {
   heuristicRules: [{ maxRepetitions: 5, windowSize: 10 }],
   defaultRiskCategory: 'read_only',
 };
+
+/** A veto that is about to take effect — surfaced so the host can make it VISIBLE. */
+export interface VolitionVetoNotice {
+  readonly toolName: string;
+  readonly reasoning: string;
+  /** 'plan' = dropped by deliberatePlan's modifiedPlan filter; 'action' = per-action veto. */
+  readonly phase: 'plan' | 'action';
+}
+
+/**
+ * Observability hooks (C#1 feel-test closure → V-1): the loop applies a
+ * plan-level veto as a SILENT filter (modifiedPlan → calls dropped, no
+ * tool_result, no user message). onVeto lets the plugin factory surface every
+ * veto (e.g. emit TOOL_BLOCKED) so a veto is never a silent disappearance.
+ */
+export interface VolitionRuleEngineHooks {
+  readonly onVeto?: (notice: VolitionVetoNotice) => void;
+}
 
 interface RuleCheckResult {
   veto: boolean;
@@ -128,8 +160,12 @@ function evaluateAction(
   const riskCategory = resolveRiskCategory(deliberationContext, defaultCategory);
   const actionHistory = deliberationContext?.actionHistory ?? [];
 
-  // Precedence: hard > soft > heuristic
-  const hardResult = checkHardRules(toolName, riskCategory, config.hardRules ?? []);
+  // Precedence: hard > soft > heuristic.
+  // V-2 mode: 'block' vetoes on a hard-rule hit; 'confirm' passes the call
+  // through to the downstream confirmation gate; 'allow' skips hard rules.
+  const mode = config.mode ?? 'block';
+  const hardResult =
+    mode === 'block' ? checkHardRules(toolName, riskCategory, config.hardRules ?? []) : null;
   if (hardResult) return hardResult;
 
   const softResult = checkSoftRules(toolName, config.softRules ?? []);
@@ -143,7 +179,17 @@ function evaluateAction(
 
 export function createRuleEngineVolition(
   config: VolitionRuleEngineConfig = DEFAULT_VOLITION_RULE_ENGINE_CONFIG,
+  hooks: VolitionRuleEngineHooks = {},
 ): IVolition {
+  // A notifier crash must never break deliberation (observability is best-effort).
+  const notifyVeto = (notice: VolitionVetoNotice): void => {
+    try {
+      hooks.onVeto?.(notice);
+    } catch {
+      /* swallow */
+    }
+  };
+
   return {
     skandha: 'vijnana',
 
@@ -170,6 +216,12 @@ export function createRuleEngineVolition(
           allowedActions.push(input.proposedActions[i]);
         } else {
           reasons.push(results[i].reasoning);
+          // The loop applies modifiedPlan as a silent filter — surface the drop.
+          notifyVeto({
+            toolName: input.proposedActions[i].name,
+            reasoning: results[i].reasoning,
+            phase: 'plan',
+          });
         }
       }
 
@@ -190,6 +242,14 @@ export function createRuleEngineVolition(
         input.deliberationContext,
         config,
       );
+
+      if (result.veto) {
+        notifyVeto({
+          toolName: input.proposedAction.name,
+          reasoning: result.reasoning,
+          phase: 'action',
+        });
+      }
 
       return {
         veto: result.veto,

@@ -48,8 +48,26 @@ export function stripAnsiEscapes(s: string): string {
 
 // ─── Stdio Listener (受蘊 - Input) ───
 
+/** y/yes (any case) approves; everything else denies (fail-closed). */
+export function parseConfirmationAnswer(line: string): boolean {
+  return /^(y|yes)$/i.test(line.trim());
+}
+
+interface PendingConfirmation {
+  toolCallId: string;
+  nonce: string;
+  expiresAt: number;
+}
+
 function createStdioListener(ctx: IPluginContext): IListener {
   let rl: ReturnType<typeof createInterface> | null = null;
+  // V-2: while a confirmation is pending, the NEXT stdin line answers it
+  // (CONFIRMATION_RESPONSE with the request's nonce) instead of becoming
+  // user input. The core's waitForConfirmation validates nonce + applies
+  // the default-deny timeout; an expired pending is dropped here and the
+  // line falls through as normal input.
+  let pending: PendingConfirmation | null = null;
+  let unsubConfirm: (() => void) | null = null;
 
   return {
     skandha: 'rupa' as const,
@@ -62,6 +80,18 @@ function createStdioListener(ctx: IPluginContext): IListener {
         return;
       }
 
+      unsubConfirm = ctx.bus.on(AgentEventType.CONFIRMATION_REQUEST, (event) => {
+        const p = event.payload as
+          | { toolCallId?: string; nonce?: string; timeoutMs?: number }
+          | undefined;
+        if (!p?.toolCallId || !p?.nonce) return;
+        pending = {
+          toolCallId: p.toolCallId,
+          nonce: p.nonce,
+          expiresAt: Date.now() + (p.timeoutMs ?? 30000),
+        };
+      });
+
       rl = createInterface({
         input: process.stdin,
         output: process.stdout,
@@ -70,13 +100,33 @@ function createStdioListener(ctx: IPluginContext): IListener {
 
       rl.on("line", (line: string) => {
         const trimmed = line.trim();
-        if (trimmed) {
-          ctx.pushInput({
-            source: "cli",
-            inputType: "user_input",
-            data: trimmed,
-          });
+        if (!trimmed) return;
+
+        if (pending) {
+          const current = pending;
+          pending = null;
+          if (Date.now() < current.expiresAt) {
+            const approved = parseConfirmationAnswer(trimmed);
+            ctx.bus.emit({
+              type: AgentEventType.CONFIRMATION_RESPONSE,
+              timestamp: Date.now(),
+              payload: {
+                toolCallId: current.toolCallId,
+                nonce: current.nonce,
+                approved,
+                reasoning: approved ? "user approved via CLI" : `user answered "${trimmed}"`,
+              },
+            });
+            return; // consumed as the confirmation answer
+          }
+          // expired — core already default-denied; fall through as normal input
         }
+
+        ctx.pushInput({
+          source: "cli",
+          inputType: "user_input",
+          data: trimmed,
+        });
       });
 
       rl.on("close", () => {
@@ -89,6 +139,10 @@ function createStdioListener(ctx: IPluginContext): IListener {
     },
 
     async stop(): Promise<void> {
+      if (unsubConfirm) {
+        unsubConfirm();
+        unsubConfirm = null;
+      }
       if (rl) {
         rl.close();
         rl = null;
@@ -185,6 +239,37 @@ function createStdioUI(ctx: IPluginContext): IUI {
           const errMsg = stripAnsiEscapes((payload?.error as string) ?? "unknown error");
           console.log(
             `${RED}[tool error] ${payload?.name as string ?? ""}: ${errMsg}${RESET}`,
+          );
+          break;
+        }
+
+        // V-2 (interactive confirm): show the y/N question — the listener
+        // consumes the next stdin line as the answer (default-deny on timeout).
+        case AgentEventType.CONFIRMATION_REQUEST: {
+          if (isStreaming) {
+            process.stdout.write(`${RESET}\n`);
+            isStreaming = false;
+          }
+          const prompt = stripAnsiEscapes((payload?.prompt as string) ?? "Confirm this action?");
+          const timeoutMs = (payload?.timeoutMs as number) ?? 30000;
+          console.log(
+            `${YELLOW}[confirm] ${prompt} — type y to allow, anything else denies ` +
+              `(auto-deny in ${Math.round(timeoutMs / 1000)}s)${RESET}`,
+          );
+          break;
+        }
+
+        // V-1 (veto observability): TOOL_BLOCKED was emitted by volition /
+        // exec-guard / confirmation-gate but rendered by NO UI — a blocked
+        // call looked like a silent no-op to the user. Make every block visible.
+        case AgentEventType.TOOL_BLOCKED: {
+          if (isStreaming) {
+            process.stdout.write(`${RESET}\n`);
+            isStreaming = false;
+          }
+          const reason = stripAnsiEscapes((payload?.reason as string) ?? "blocked");
+          console.log(
+            `${RED}[blocked] ${payload?.name as string ?? "tool"} — ${reason}${RESET}`,
           );
           break;
         }
